@@ -126,7 +126,13 @@ The following performance optimizations were implemented in this model:
 - The layout (order of dimensions) of the bases tensors is optimized to avoid copies to contiguous memory in the downstream TFN layers
 - When Tensor Cores are available, and the output feature dimension of computed bases is odd, then it is padded with zeros to make more effective use of Tensor Cores (AMP and TF32 precisions)
 - Multiple levels of fusion for TFN convolutions (and radial profiles) are provided and automatically used when conditions are met
-- A low-memory mode is provided that will trade throughput for less memory use (`--low_memory`)
+- A low-memory mode is provided that will trade throughput for less memory use (`--low_memory`). Overview of memory savings over the official implementation (batch size 100), depending on the precision and the low memory mode:
+
+    |   | FP32               | AMP                
+    |---|-----------------------|--------------------------
+    |`--low_memory false` (default)   |         4.7x | 7.1x
+    |`--low_memory true`   |         29.4x | 43.6x 
+
 
 **Self-attention optimizations**
 
@@ -328,7 +334,7 @@ The complete list of the available parameters for the `training.py` script conta
 - `--gradient_clip`: Clipping of the gradient norms (default: `None`)
 - `--accumulate_grad_batches`: Gradient accumulation (default: `1`)
 - `--ckpt_interval`: Save a checkpoint every N epochs (default: `-1`)
-- `--eval_interval`: Do an evaluation round every N epochs (default: `1`)
+- `--eval_interval`: Do an evaluation round every N epochs (default: `20`)
 - `--silent`: Minimize stdout output (default: `false`)
 
 **Paths**
@@ -358,7 +364,7 @@ The complete list of the available parameters for the `training.py` script conta
 - `--pooling`: Type of graph pooling (default: `max`)
 - `--norm`: Apply a normalization layer after each attention block (default: `false`)
 - `--use_layer_norm`: Apply layer normalization between MLP layers (default: `false`)
-- `--low_memory`: If true, will use fused ops that are slower but use less memory (expect 25 percent less memory). Only has an effect if AMP is enabled on NVIDIA Volta GPUs or if running on Ampere GPUs (default: `false`)
+- `--low_memory`: If true, will use ops that are slower but use less memory (default: `false`)
 - `--num_degrees`: Number of degrees to use. Hidden features will have types [0, ..., num_degrees - 1] (default: `4`)
 - `--num_channels`: Number of channels for the hidden features (default: `32`)
 
@@ -407,7 +413,8 @@ The training script is `se3_transformer/runtime/training.py`, to be run as a mod
 
 By default, the resulting logs are stored in `/results/`. This can be changed with `--log_dir`.
 
-You can connect your existing Weights & Biases account by setting the `WANDB_API_KEY` environment variable.
+You can connect your existing Weights & Biases account by setting the WANDB_API_KEY environment variable, and enabling the `--wandb` flag.
+If no API key is set, `--wandb` will log the run anonymously to Weights & Biases.
 
 **Checkpoints**
 
@@ -485,6 +492,7 @@ Our results were obtained by running the `scripts/train.sh` training script in t
 |  8                 |    240                   |           0.03380                            |        0.03495                                |        29min          |    20min                |    1.45x              |
 
 
+
 #### Training performance results
 
 ##### Training performance: NVIDIA DGX A100 (8x A100 80GB)
@@ -495,8 +503,8 @@ Our results were obtained by running the `scripts/benchmark_train.sh` and `scrip
 |:------------------:|:----------------------:|:--------------------:|:------------------------------------:|:---------------------------------:|:----------------------:|:----------------------------------------------:|
 |   1              |     240             |   2.21                                       |   2.92                            |   1.32x                         |                      |                                              |
 |   1              |     120              |  1.81                                        |  2.04                             |  1.13x                          |                      |                                              |
-|   8              |     240             |   17.15                                      |     22.95                         |   1.34x                         |   7.76               |    7.86                                     |
-|   8              |     120              |  13.89                                       |    15.62                          |  1.12x                          |       7.67           |    7.66                                       |
+|   8              |     240             |   15.88                                      |     21.02                         |   1.32x                         |   7.18               |    7.20                                     |
+|   8              |     120              |  12.68                                       |    13.99                          |  1.10x                          |       7.00           |    6.86                                       |
 
 
 To achieve these same results, follow the steps in the [Quick Start Guide](#quick-start-guide).
@@ -510,8 +518,8 @@ Our results were obtained by running the `scripts/benchmark_train.sh` and `scrip
 |:------------------:|:----------------------:|:--------------------:|:------------------------------------:|:---------------------------------:|:----------------------:|:----------------------------------------------:|
 |   1              |     240              |    1.25          |    1.88                           |  1.50x                          |                      |                                              |
 |   1              |     120              |    1.03           |   1.41                            |  1.37x                          |                      |                                              |
-|   8              |     240              |    9.33           |   14.02                           |  1.50x                          |      7.46            |      7.46                                    |
-|   8              |     120              |    7.39           |   9.41                           |   1.27x                         |        7.17          |        6.67                                  |
+|   8              |     240              |    8.68           |   12.75                           |  1.47x                          |      6.94            |      6.78                                    |
+|   8              |     120              |    6.64           |   8.58                           |   1.29x                         |        6.44          |        6.08                                  |
 
 
 To achieve these same results, follow the steps in the [Quick Start Guide](#quick-start-guide).
@@ -571,6 +579,20 @@ To achieve these same results, follow the steps in the [Quick Start Guide](#quic
 ## Release notes
 
 ### Changelog
+
+November 2021:
+- Improved low memory mode to give further 6x memory savings
+- Disabled W&B logging by default
+- Fixed persistent workers when using one data loading process
+
+October 2021:
+- Updated README performance tables
+- Fixed shape mismatch when using partially fused TFNs per output degree
+- Fixed shape mismatch when using partially fused TFNs per input degree with edge degrees > 0
+
+September 2021:
+- Moved to new location (from `PyTorch/DrugDiscovery` to `DGLPyTorch/DrugDiscovery`)
+- Fixed multi-GPUs training script
 
 August 2021
 - Initial release
