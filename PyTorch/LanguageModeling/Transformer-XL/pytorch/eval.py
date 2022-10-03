@@ -26,10 +26,6 @@ import dllogger
 import numpy as np
 import torch
 import yaml
-try:
-    import pyprof
-except ModuleNotFoundError:
-    warnings.warn('PyProf is unavailable')
 
 import data_utils
 import utils
@@ -84,8 +80,6 @@ def parse_args():
                                  'socket_unique_continuous',
                                  'disabled'],
                         help='type of CPU affinity')
-    parser.add_argument('--profile', action='store_true',
-                        help='Enable profiling with DLProf')
     parser.add_argument('--type', type=str, default='pytorch',
                         choices=['pytorch', 'torchscript'],
                         help='type of runtime to use')
@@ -311,14 +305,16 @@ def main():
                                   )
     utils.exp_utils.setup_dllogger(enabled=True, filename=dllog_file)
 
-    if args.profile:
-        try:
-            pyprof.init(enable_function_stack=True)
-        except NameError:
-            warnings.warn('Called pyprof.init() but pyprof is not available')
-
     logging.info(args)
     dllogger.log(step='PARAMETER', data=vars(args))
+
+    dllogger.metadata('eval_throughput', {'unit': 'tokens/s'})
+    dllogger.metadata('eval_loss', {'unit': None})
+    dllogger.metadata('eval_perplexity', {'unit': None})
+    dllogger.metadata('eval_latency', {'unit': 'ms'})
+    dllogger.metadata('eval_avg_latency', {'unit': 'ms'})
+    for p in args.percentiles:
+        dllogger.metadata(f'eval_{p}%_latency', {'unit': 'ms'})
 
     if not args.no_env:
         log_env_info()
@@ -454,9 +450,7 @@ def main():
     meters['eval_throughput'] = AverageMeter(warmup=warmup, keep=args.save_data)
     meters['eval_latency'] = AverageMeter(warmup=warmup, keep=args.save_data)
 
-    with torch.autograd.profiler.emit_nvtx(enabled=args.profile):
-        loss = evaluate(iter, model, meters, args.log_interval, args.max_size,
-                        args.repeat)
+    loss = evaluate(iter, model, meters, args.log_interval, args.max_size, args.repeat)
     perplexity = math.exp(loss)
     log_str = format_log(loss, args.split, args)
 

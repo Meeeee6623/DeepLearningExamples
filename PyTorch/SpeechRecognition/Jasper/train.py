@@ -18,14 +18,8 @@ import os
 import random
 import time
 
-try:
-    import nvidia_dlprof_pytorch_nvtx as pyprof
-except ModuleNotFoundError:
-    import pyprof
-
 import torch
 import numpy as np
-import torch.cuda.profiler as profiler
 import torch.distributed as dist
 from contextlib import suppress as empty_context
 
@@ -64,7 +58,6 @@ def parse_args():
                           type=int, help='GPU id used for distributed training')
     training.add_argument('--pre_allocate_range', default=None, type=int, nargs=2,
                           help='Warmup with batches of length [min, max] before training')
-    training.add_argument('--pyprof', action='store_true', help='Enable pyprof profiling')
 
     optim = parser.add_argument_group('optimization setup')
     optim.add_argument('--batch_size', default=32, type=int,
@@ -173,8 +166,9 @@ def evaluate(epoch, step, val_loader, val_feat_proc, labels, model,
             agg['txts'] += helpers.gather_transcripts([txt], [txt_lens], labels)
 
         wer, loss = process_evaluation_epoch(agg)
-        log((epoch,), step, subset, {'loss': loss, 'wer': 100.0 * wer,
-                                     'took': time.time() - start_time})
+        log(() if epoch is None else (epoch,),
+            step, subset, {'loss': loss, 'wer': 100.0 * wer,
+                           'took': time.time() - start_time})
         model.train()
     return wer
 
@@ -339,8 +333,6 @@ def main():
     if multi_gpu:
         model = torch.nn.parallel.DistributedDataParallel(
             model, device_ids=[args.local_rank], output_device=args.local_rank)
-    if args.pyprof:
-        pyprof.init(enable_function_stack=True)
 
     # load checkpoint
     meta = {'best_wer': 10**6, 'start_epoch': 0}
@@ -356,10 +348,6 @@ def main():
     best_wer = meta['best_wer']
     epoch = 1
     step = start_epoch * steps_per_epoch + 1
-
-    if args.pyprof:
-        torch.autograd.profiler.emit_nvtx().__enter__()
-        profiler.start()
 
     # training loop
     model.train()
@@ -509,16 +497,12 @@ def main():
             break
         # end of epoch
 
-    if args.pyprof:
-        profiler.stop()
-        torch.autograd.profiler.emit_nvtx().__exit__(None, None, None)
-
     log((), None, 'train_avg', bmark_stats.get(args.benchmark_epochs_num))
 
-    if epoch == args.epochs:
-        evaluate(epoch, step, val_loader, val_feat_proc, symbols, model,
-                 ema_model, ctc_loss, greedy_decoder, args.amp, use_dali)
+    evaluate(None, step, val_loader, val_feat_proc, symbols, model,
+             ema_model, ctc_loss, greedy_decoder, args.amp, use_dali)
 
+    if epoch == args.epochs:
         checkpointer.save(model, ema_model, optimizer, scaler, epoch, step,
                           best_wer)
     flush_log()

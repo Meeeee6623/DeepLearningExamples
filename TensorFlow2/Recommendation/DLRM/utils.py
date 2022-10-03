@@ -19,6 +19,16 @@ import time
 import dllogger
 import horovod.tensorflow as hvd
 import json
+import os
+
+
+def get_variable_path(checkpoint_path, name, i=0):
+    tokens = name.split('/')
+    tokens = [t for t in tokens if 'model_parallel' not in t and 'data_parallel' not in t]
+    name = '_'.join(tokens)
+    name = name.replace(':', '_')
+    filename = name + f'_part{i}' + '.npy'
+    return os.path.join(checkpoint_path, filename)
 
 
 def print_model_summary(model):
@@ -37,29 +47,31 @@ def dist_print(*args, force=False, **kwargs):
 
 
 def init_logging(log_path, FLAGS):
+    if hvd.rank() != 0:
+        return
     json_backend = dllogger.JSONStreamBackend(verbosity=dllogger.Verbosity.VERBOSE,
                                               filename=log_path)
     stdout_backend = dllogger.StdOutBackend(verbosity=dllogger.Verbosity.VERBOSE)
-
-    stdout_backend._metadata['auc'].update({'format': '0:.5f'})
-    stdout_backend._metadata['throughput'].update({'format': ':.2e'})
-    stdout_backend._metadata['mean_step_time_ms'].update({'format': '0:.3f'})
-    stdout_backend._metadata['mean_inference_throughput'].update({'format': ':.2e'})
-    stdout_backend._metadata['mean_inference_latency'].update({'format': '0:.5f'})
-    for percentile in [90, 95, 99]:
-        stdout_backend._metadata[f'p{percentile}_inference_latency'].update({'format': '0:.5f'})
-
     dllogger.init(backends=[json_backend, stdout_backend])
 
-    if hvd.rank() == 0:
-        dllogger.log(data=FLAGS.flag_values_dict(), step='PARAMETER')
-        print("Command line flags:")
-        print(json.dumps(FLAGS.flag_values_dict(), indent=4))
+    dllogger.metadata('auc', {'unit': None, 'format': '0:.5f'})
+    dllogger.metadata('throughput', {'unit': 'samples/s', 'format': ':.2e'})
+    dllogger.metadata('validation_loss', {'unit': None, 'format': '0:.5f'})
+    dllogger.metadata('train_loss', {'unit': None, 'format': '0:.5f'})
+    dllogger.metadata('mean_step_time_ms', {'unit': 'ms', 'format': '0:.3f'})
+    dllogger.metadata('mean_inference_throughput', {'unit': 'samples/s', 'format': ':.2e'})
+    dllogger.metadata('mean_inference_latency', {'unit': 's', 'format': '0:.5f'})
+    for percentile in [90, 95, 99]:
+        dllogger.metadata(f'p{percentile}_inference_latency', {'unit': 's', 'format': '0:.5f'})
+
+    dllogger.log(data=FLAGS.flag_values_dict(), step='PARAMETER')
+    print("Command line flags:")
+    print(json.dumps(FLAGS.flag_values_dict(), indent=4))
 
 
 class IterTimer:
     def __init__(self, train_batch_size, test_batch_size, optimizer, print_freq=50,
-                 enabled=True, benchmark_warmup_steps=100):
+                 enabled=True, benchmark_warmup_steps=None):
         self.previous_tick = None
         self.train_idx = 0
         self.test_idx = 0
@@ -69,8 +81,12 @@ class IterTimer:
         self.optimizer = optimizer
         self.enabled = enabled
         self.training_steps_time = 0
-        self.benchmark_warmup_steps = benchmark_warmup_steps
         self.steps_measured = 0
+
+        if benchmark_warmup_steps is None:
+            self.benchmark_warmup_steps = print_freq * 2
+        else:
+            self.benchmark_warmup_steps = benchmark_warmup_steps
 
     def step_train(self, loss=None):
         if not self.enabled:
@@ -102,6 +118,9 @@ class IterTimer:
         self.train_idx += 1
 
     def mean_train_time(self):
+        if self.steps_measured == 0:
+            print("Run too short to measure mean training time")
+            return float('nan')
         return self.training_steps_time / self.steps_measured
 
     def step_test(self):

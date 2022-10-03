@@ -30,6 +30,7 @@ from typing import Optional
 import torch
 from torch import nn as nn
 
+from common import filter_warnings
 from fastpitch.model import TemporalPredictor
 from fastpitch.transformer_jit import FFTransformer
 
@@ -59,6 +60,7 @@ def regulate_len(durations, enc_out, pace: float = 1.0,
 
 
 class FastPitchJIT(nn.Module):
+    __constants__ = ['energy_conditioning']
     def __init__(self, n_mel_channels, n_symbols, padding_idx,
                  symbols_embedding_dim, in_fft_n_layers, in_fft_n_heads,
                  in_fft_d_head,

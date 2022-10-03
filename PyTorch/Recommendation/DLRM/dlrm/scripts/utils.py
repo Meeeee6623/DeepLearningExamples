@@ -189,8 +189,19 @@ def init_logging(log_path):
     stdout_backend._metadata['best_epoch'].update({'format': '0:.2f'})
     stdout_backend._metadata['average_train_throughput'].update({'format': ':.2e'})
     stdout_backend._metadata['average_test_throughput'].update({'format': ':.2e'})
+    stdout_backend._metadata['training_loss'].update({'format': '0:.5f'})
+    stdout_backend._metadata['best_validation_loss'].update({'format': '0:.5f'})
 
     dllogger.init(backends=[json_backend, stdout_backend])
+
+    dllogger.metadata("best_auc", {"unit": None})
+    dllogger.metadata("mean_inference_latency_batch_1", {"unit": "s"})
+    dllogger.metadata("mean_inference_latency_batch_64", {"unit": "s"})
+    dllogger.metadata("mean_inference_latency_batch_4096", {"unit": "s"})
+    dllogger.metadata("average_train_throughput", {"unit": "samples/s"})
+    dllogger.metadata("mean_inference_throughput_batch_1", {"unit": "samples/s"})
+    dllogger.metadata("mean_inference_throughput_batch_64", {"unit": "samples/s"})
+    dllogger.metadata("mean_inference_throughput_batch_4096", {"unit": "samples/s"})
 
 
 class StepTimer():
@@ -232,6 +243,7 @@ class LearningRateScheduler:
             lr_scheduler.step()
             # foward, backward, weight update
     """
+
     def __init__(self, optimizers, base_lrs, warmup_steps, warmup_factor,
                  decay_steps, decay_start_step, decay_power=2, end_lr_factor=0):
         self.current_step = 0

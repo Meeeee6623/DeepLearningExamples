@@ -18,21 +18,19 @@
 from absl import app, flags
 import os
 import sys
+from distributed_embeddings.python.layers import dist_model_parallel as dmp
 
 # Define the flags first before importing TensorFlow.
 # Otherwise, enabling XLA-Lite would be impossible with a command-line flag
 def define_command_line_flags():
-    flags.DEFINE_enum("mode", default="train",
-                      enum_values=['eval', 'train', 'inference'],
+    flags.DEFINE_enum("mode", default="train", enum_values=['inference', 'eval', 'train', 'deploy'],
                       help='Choose "train" to train the model, "inference" to benchmark inference'
                       ' and "eval" to run validation')
     flags.DEFINE_float("learning_rate", default=24, help="Learning rate")
     flags.DEFINE_integer("batch_size", default=64 * 1024, help="Batch size used for training")
-    flags.DEFINE_integer("valid_batch_size", default=64 * 1024, help="Batch size used for validation")
     flags.DEFINE_bool("run_eagerly", default=False, help="Disable all tf.function decorators for debugging")
 
     flags.DEFINE_bool("dummy_model", default=False, help="Use a dummy model for benchmarking and debugging")
-    flags.DEFINE_bool("dummy_embedding", default=False, help="")
 
     flags.DEFINE_list("top_mlp_dims", [1024, 1024, 512, 256, 1], "Linear layer sizes for the top MLP")
     flags.DEFINE_list("bottom_mlp_dims", [512, 256, 128], "Linear layer sizes for the bottom MLP")
@@ -47,34 +45,19 @@ def define_command_line_flags():
 
     flags.DEFINE_string("saved_model_output_path", default=None,
                         help='Path for storing the model in TensorFlow SavedModel format')
+    flags.DEFINE_bool("save_input_signature", default=False,
+                      help="Save input signature in the SavedModel")
     flags.DEFINE_string("saved_model_input_path", default=None,
                         help='Path for loading the model in TensorFlow SavedModel format')
 
-    flags.DEFINE_enum("dataset_type", default="raw", enum_values=['raw', 'synthetic'],
-                      help='The type of the dataset to use')
-    flags.DEFINE_integer("num_numerical_features", default=13,
-                      help='Number of numerical features to be read from the dataset. '
-                           'If set to 0, then no numerical features will be loaded '
-                           'and the Bottom MLP will not be evaluated')
-
-    flags.DEFINE_integer('synthetic_dataset_train_batches', default=64008,
-                         help='Number of training batches in the synthetic dataset')
-    flags.DEFINE_integer('synthetic_dataset_valid_batches', default=1350,
-                         help='Number of validation batches in the synthetic dataset')
-    flags.DEFINE_list('synthetic_dataset_cardinalities', default=26*[1000],
-                         help='Number of categories for each embedding table of the synthetic dataset')
-
+    flags.DEFINE_bool('cpu', default=False, help='Place the entire model on CPU')
 
     flags.DEFINE_bool("amp", default=False, help="Enable automatic mixed precision")
+    flags.DEFINE_bool("fp16", default=False,
+                      help="Create the model in pure FP16 precision, suitable only for inference and deployment")
     flags.DEFINE_bool("xla", default=False, help="Enable XLA")
 
     flags.DEFINE_integer("loss_scale", default=1024, help="Static loss scale to use with mixed precision training")
-
-    flags.DEFINE_bool("batch_shuffle", default=False, help="Shuffle the order of the batches")
-    flags.DEFINE_integer("shuffle_seed", default=None, help="Random seed for dataset shuffling")
-
-    flags.DEFINE_integer("prefetch_batches", default=10,
-                         help="The number of batches to prefetch for the dataloader")
 
     flags.DEFINE_integer("auc_thresholds", default=8000,
                          help="Number of thresholds for the AUC computation")
@@ -84,16 +67,13 @@ def define_command_line_flags():
 
     flags.DEFINE_bool("embedding_trainable", default=True, help="If True the embeddings will be trainable, otherwise frozen")
 
-    flags.DEFINE_string("dot_interaction", default="custom_cuda",
-                        help="Dot interaction implementation to use, possible choices: custom_cuda, tensorflow, dummy")
-
-    flags.DEFINE_string("dataset_path", default=None,
-                        help="Path to the JSON file with the sizes of embedding tables")
+    flags.DEFINE_enum("dot_interaction", default="custom_cuda", enum_values=["custom_cuda", "tensorflow", "dummy"],
+                      help="Dot interaction implementation to use")
 
     flags.DEFINE_integer("embedding_dim", default=128, help='Number of columns in the embedding tables')
 
     flags.DEFINE_integer("evals_per_epoch", default=1, help='Number of evaluations per epoch')
-    flags.DEFINE_float("print_freq", default=1000, help='Number of steps between debug prints')
+    flags.DEFINE_float("print_freq", default=100, help='Number of steps between debug prints')
 
     flags.DEFINE_integer("warmup_steps", default=8000,
                         help='Number of steps over which to linearly increase the LR at the beginning')
@@ -106,16 +86,41 @@ def define_command_line_flags():
     flags.DEFINE_integer("inter_op_parallelism", default=None, help='Number of inter op threads')
     flags.DEFINE_integer("intra_op_parallelism", default=None, help='Number of intra op threads')
 
-    flags.DEFINE_integer("tf_gpu_memory_limit_gb", default=26,
-                         help='Gigabytes of GPU memory reserved for TensorFlow. Only applied in multiGPU/multiNode to leave'
-                              ' enough memory for NCCL to operate properly.')
+    flags.DEFINE_string("dist_strategy", default='memory_balanced',
+                        help="Strategy for the Distributed Embeddings to use. Supported options are"
+                        "'memory_balanced', 'basic' and 'memory_optimized'")
 
-    flags.DEFINE_bool("data_parallel_bottom_mlp", default=False, help="Run the bottom MLP in data-parallel mode")
-    flags.DEFINE_bool("experimental_columnwise_split", default=False,
-                      help="Enable slicing individual embedding tables across multiple devices")
+    flags.DEFINE_bool("use_merlin_de_embeddings", default=False,
+                      help="Use the embedding implementation from the TensorFlow Distributed Embeddings package")
+
+
+    flags.DEFINE_integer("column_slice_threshold", default=10*1000*1000*1000,
+                         help='Number of elements above which a distributed embedding will be sliced across'
+                         'multiple devices')
 
     flags.DEFINE_string("log_path", default='dlrm_tf_log.json', help="Path to JSON file for storing benchmark results")
 
+    #dataset and dataloading settings
+    flags.DEFINE_string("dataset_path", default=None,
+                        help="Path to dataset directory")
+    flags.DEFINE_string("feature_spec", default="feature_spec.yaml",
+                        help="Name of the feature spec file in the dataset directory")
+    flags.DEFINE_enum("dataset_type", default="tf_raw", enum_values=['tf_raw', 'synthetic'],
+                      help='The type of the dataset to use')
+
+    # Synthetic dataset settings
+    flags.DEFINE_boolean("synthetic_dataset_use_feature_spec", default=False,
+                         help="Create a temporary synthetic dataset based on a real one. "
+                              "Uses --dataset_path and --feature_spec"
+                              "Overrides synthetic dataset dimension flags, other than the number of batches")
+    flags.DEFINE_integer('synthetic_dataset_train_batches', default=64008,
+                         help='Number of training batches in the synthetic dataset')
+    flags.DEFINE_integer('synthetic_dataset_valid_batches', default=1350,
+                         help='Number of validation batches in the synthetic dataset')
+    flags.DEFINE_list('synthetic_dataset_cardinalities', default=26*[1000],
+                         help='Number of categories for each embedding table of the synthetic dataset')
+    flags.DEFINE_integer('synthetic_dataset_num_numerical_features', default=13,
+                         help='Number of numerical features of the synthetic dataset')
 
 define_command_line_flags()
 
@@ -123,9 +128,12 @@ FLAGS = flags.FLAGS
 app.define_help_flags()
 app.parse_flags_with_usage(sys.argv)
 
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 if FLAGS.xla:
-    os.environ['TF_XLA_FLAGS'] = '--tf_xla_auto_jit=fusible'
+    if FLAGS.cpu:
+        os.environ['TF_XLA_FLAGS'] = '--tf_xla_auto_jit=fusible --tf_xla_cpu_global_jit'
+    else:
+        os.environ['TF_XLA_FLAGS'] = '--tf_xla_auto_jit=fusible'
+
 
 import time
 from lr_scheduler import LearningRateScheduler
@@ -133,36 +141,34 @@ import tensorflow as tf
 import tensorflow_addons as tfa
 import numpy as np
 from utils import IterTimer, init_logging, dist_print
-from dataloader import create_input_pipelines
-from model import Dlrm, DummyDlrm, DlrmTrainer, evaluate, DataParallelSplitter
+from dataloader import create_input_pipelines, get_dataset_metadata
+from model import Dlrm, DummyDlrm, DlrmTrainer, evaluate
 import horovod.tensorflow as hvd
 from tensorflow.keras.mixed_precision import LossScaleOptimizer
 import dllogger
+
 
 def init_tf(FLAGS):
     """
     Set global options for TensorFlow
     """
-
     gpus = tf.config.experimental.list_physical_devices('GPU')
 
-    if gpus:
-        tf.config.experimental.set_visible_devices(gpus[hvd.local_rank()], 'GPU')
+    for gpu in gpus:
+        tf.config.experimental.set_memory_growth(gpu, True)
 
-    if hvd.size() > 1:
-        memory_limit_mb = FLAGS.tf_gpu_memory_limit_gb * 1024
-        print(f"Limiting TF memory to: {memory_limit_mb} MB")
-
-        tf.config.set_logical_device_configuration(gpus[hvd.local_rank()],
-                                                   [tf.config.LogicalDeviceConfiguration(memory_limit=memory_limit_mb)])
-        tf.config.experimental.set_virtual_device_configuration(
-            gpus[hvd.local_rank()],
-            [tf.config.experimental.VirtualDeviceConfiguration(memory_limit=memory_limit_mb)],
-        )
+    visible_gpus = []
+    if gpus and not FLAGS.cpu:
+        visible_gpus = gpus[hvd.local_rank()]
+    tf.config.experimental.set_visible_devices(visible_gpus, 'GPU')
 
     if FLAGS.amp:
-        policy = tf.keras.mixed_precision.experimental.Policy("mixed_float16", loss_scale=FLAGS.loss_scale)
-        tf.keras.mixed_precision.experimental.set_policy(policy)
+        policy = tf.keras.mixed_precision.Policy("mixed_float16")
+        tf.keras.mixed_precision.set_global_policy(policy)
+
+    if FLAGS.fp16:
+        policy = tf.keras.mixed_precision.Policy("float16")
+        tf.keras.mixed_precision.experimental.set_global_policy(policy)
 
     tf.config.run_functions_eagerly(FLAGS.run_eagerly)
 
@@ -172,9 +178,6 @@ def init_tf(FLAGS):
     if FLAGS.intra_op_parallelism:
         tf.config.threading.set_intra_op_parallelism_threads(FLAGS.intra_op_parallelism)
 
-    if FLAGS.xla:
-        os.environ['TF_XLA_FLAGS'] = '--tf_xla_auto_jit=fusible'
-
 
 def compute_eval_points(train_batches, evals_per_epoch):
     eval_points = np.linspace(0, train_batches - 1, evals_per_epoch + 1)[1:]
@@ -182,7 +185,7 @@ def compute_eval_points(train_batches, evals_per_epoch):
     return eval_points
 
 
-def inference_benchmark(validation_pipeline, dlrm, timer, splitter, FLAGS):
+def inference_benchmark(validation_pipeline, dlrm, timer, FLAGS):
     if FLAGS.max_steps == -1:
         FLAGS.max_steps = 1000
 
@@ -193,35 +196,24 @@ def inference_benchmark(validation_pipeline, dlrm, timer, splitter, FLAGS):
 
     auc, test_loss, latencies = evaluate(validation_pipeline, dlrm,
                                timer, auc_thresholds=FLAGS.auc_thresholds,
-                               data_parallel_splitter=splitter,
                                max_steps=FLAGS.max_steps, cast_dtype=cast_dtype)
 
     # don't benchmark the first few warmup steps
     latencies = latencies[10:]
     result_data = {
-        'mean_inference_throughput': FLAGS.valid_batch_size / np.mean(latencies),
+        'mean_inference_throughput': FLAGS.batch_size / np.mean(latencies),
         'mean_inference_latency': np.mean(latencies)
     }
 
     for percentile in [90, 95, 99]:
         result_data[f'p{percentile}_inference_latency'] = np.percentile(latencies, percentile)
     result_data['auc'] = auc
-    dllogger.log(data=result_data, step=tuple())
+
+    if hvd.rank() == 0:
+        dllogger.log(data=result_data, step=tuple())
 
 
 def validate_cmd_line_flags():
-    if FLAGS.experimental_columnwise_split and not FLAGS.data_parallel_bottom_mlp and FLAGS.num_numerical_features > 0:
-        raise ValueError('Currently when using the --experimenal_columnwise_split option '
-                         'you must either set --data_parallel_bottom_mlp or --num_numerical_features=0')
-
-    if FLAGS.batch_size != FLAGS.valid_batch_size:
-        raise ValueError('For now, validation batch size must be the same as training batch size')
-
-    if FLAGS.batch_shuffle and FLAGS.prefetch_batches > 1:
-        raise ValueError('When using batch shuffle --prefetch_batches must be set to 1')
-
-    if FLAGS.batch_shuffle and FLAGS.shuffle_seed is None:
-        raise ValueError('When using batch shuffle --shuffle_seed must be set')
 
     if FLAGS.restore_checkpoint_path is not None and FLAGS.saved_model_input_path is not None:
         raise ValueError('Incompatible cmd-line flags.'
@@ -233,21 +225,33 @@ def validate_cmd_line_flags():
                          'To train from a checkpoint please specify the '
                          '--restore_checkpoint_path cmd-line flag.')
 
+    if FLAGS.cpu and hvd.size() > 1:
+        raise ValueError('MultiGPU mode is not supported when training on CPU')
+
+    if FLAGS.cpu and FLAGS.dot_interaction == 'custom_cuda':
+        raise ValueError('"custom_cuda" dot interaction not supported for CPU. '
+        'Please specify "--dot_interaction tensorflow" if you want to run on CPU')
+
+    if FLAGS.fp16 and FLAGS.amp:
+        raise ValueError('Only one of --amp and --fp16 can be specified at a time.')
+
 
 def main(argv):
-    validate_cmd_line_flags()
     hvd.init()
+    validate_cmd_line_flags()
     init_logging(log_path=FLAGS.log_path, FLAGS=FLAGS)
     init_tf(FLAGS)
 
-    train_pipeline, validation_pipeline, dataset_metadata, multi_gpu_metadata = create_input_pipelines(FLAGS)
+    dataset_metadata = get_dataset_metadata(FLAGS)
+    dlrm = Dlrm.load_model_if_path_exists(FLAGS.saved_model_input_path)
+    if dlrm is None:
+        if FLAGS.dummy_model:
+            dlrm = DummyDlrm(FLAGS=FLAGS, dataset_metadata=dataset_metadata)
+        else:
+            dlrm = Dlrm(FLAGS=FLAGS, dataset_metadata=dataset_metadata)
+            dlrm = dlrm.restore_checkpoint_if_path_exists(FLAGS.restore_checkpoint_path)
 
-    if FLAGS.dummy_model:
-        dlrm = DummyDlrm(FLAGS=FLAGS, dataset_metadata=dataset_metadata,
-                         multi_gpu_metadata=multi_gpu_metadata)
-    else:
-        dlrm = Dlrm(FLAGS=FLAGS, dataset_metadata=dataset_metadata,
-                    multi_gpu_metadata=multi_gpu_metadata)
+    train_pipeline, validation_pipeline = create_input_pipelines(FLAGS, dlrm.local_table_ids)
 
     if FLAGS.optimizer == 'sgd':
         embedding_optimizer = tf.keras.optimizers.SGD(learning_rate=FLAGS.learning_rate, momentum=0)
@@ -276,23 +280,24 @@ def main(argv):
                                       decay_start_step=FLAGS.decay_start_step,
                                       decay_steps=FLAGS.decay_steps)
 
-    timer = IterTimer(train_batch_size=FLAGS.batch_size, test_batch_size=FLAGS.valid_batch_size,
+    timer = IterTimer(train_batch_size=FLAGS.batch_size, test_batch_size=FLAGS.batch_size,
                       optimizer=embedding_optimizer, print_freq=FLAGS.print_freq, enabled=hvd.rank() == 0)
 
-    splitter = DataParallelSplitter(batch_size=FLAGS.batch_size)
-
-    dlrm = dlrm.restore_checkpoint_if_path_exists(FLAGS.restore_checkpoint_path)
-    dlrm = dlrm.load_model_if_path_exists(FLAGS.saved_model_input_path)
 
     if FLAGS.mode == 'inference':
-        inference_benchmark(validation_pipeline, dlrm, timer, splitter, FLAGS)
+        inference_benchmark(validation_pipeline, dlrm, timer, FLAGS)
+        return
+    elif FLAGS.mode == 'deploy':
+        dlrm.save_model_if_path_exists(FLAGS.saved_model_output_path,
+                                       save_input_signature=FLAGS.save_input_signature)
+        print('deployed to: ', FLAGS.saved_model_output_path)
         return
 
     elif FLAGS.mode == 'eval':
         test_auc, test_loss, _ = evaluate(validation_pipeline, dlrm,
-                                          timer, auc_thresholds=FLAGS.auc_thresholds,
-                                          data_parallel_splitter=splitter)
-        dist_print(f'Evaluation completed, AUC: {test_auc:.6f}, test_loss: {test_loss:.6f}')
+                                          timer, auc_thresholds=FLAGS.auc_thresholds)
+        if hvd.rank() == 0:
+            dllogger.log(data=dict(auc=test_auc, test_loss=test_loss), step=tuple())
         return
 
     eval_points = compute_eval_points(train_batches=len(train_pipeline),
@@ -300,23 +305,30 @@ def main(argv):
 
     trainer = DlrmTrainer(dlrm, embedding_optimizer=embedding_optimizer,
                           mlp_optimizer=mlp_optimizer, amp=FLAGS.amp,
-                          lr_scheduler=scheduler)
+                          lr_scheduler=scheduler,
+                          pipe=train_pipeline, cpu=FLAGS.cpu)
 
     best_auc = 0
+    best_loss = 1e6
     train_begin = time.time()
     for epoch in range(FLAGS.epochs):
-        for step, ((numerical_features, categorical_features), labels) in enumerate(train_pipeline):
+        print('Starting epoch: ', epoch)
+        for step in range(len(train_pipeline)):
             if step == FLAGS.profiler_start_step and hvd.rank() == FLAGS.profiled_rank:
                 tf.profiler.experimental.start('logdir')
 
             if FLAGS.profiler_start_step and step == FLAGS.profiler_start_step + 100 and hvd.rank() == FLAGS.profiled_rank:
                 tf.profiler.experimental.stop()
 
-            labels = splitter(labels)
-            if FLAGS.data_parallel_bottom_mlp:
-                numerical_features = splitter(numerical_features)
+            loss = trainer.train_step()
 
-            loss = trainer.train_step(numerical_features, categorical_features, labels)
+            if step == 0 and hvd.size() > 1:
+                dmp.broadcast_variables(trainer.dlrm.variables, root_rank=0)
+
+            if step % 100 == 0:
+                if tf.math.is_nan(loss):
+                    print('NaN loss encountered in training. Aborting.')
+                    break
 
             timer.step_train(loss=loss)
 
@@ -325,23 +337,25 @@ def main(argv):
                 break
 
             if step in eval_points:
-                test_auc, test_loss, _ = evaluate(validation_pipeline, dlrm,
-                                                  timer, FLAGS.auc_thresholds,
-                                                  data_parallel_splitter=splitter)
+                test_auc, test_loss, _ = evaluate(validation_pipeline, dlrm, timer, FLAGS.auc_thresholds)
                 dist_print(f'Evaluation completed, AUC: {test_auc:.6f}, test_loss: {test_loss:.6f}')
                 timer.test_idx = 0
                 best_auc = max(best_auc, test_auc)
+                best_loss = min(best_loss, test_loss)
 
     elapsed = time.time() - train_begin
     dlrm.save_checkpoint_if_path_exists(FLAGS.save_checkpoint_path)
-    dlrm.save_model_if_path_exists(FLAGS.saved_model_output_path)
+    dlrm.save_model_if_path_exists(FLAGS.saved_model_output_path,
+                                   save_input_signature=FLAGS.save_input_signature)
 
     if hvd.rank() == 0:
         dist_print(f'Training run completed, elapsed: {elapsed:.0f} [s]')
         results = {
             'throughput': FLAGS.batch_size / timer.mean_train_time(),
             'mean_step_time_ms': timer.mean_train_time() * 1000,
-            'auc': best_auc
+            'auc': best_auc,
+            'validation_loss': best_loss,
+            'train_loss': loss.numpy().item()
         }
         dllogger.log(data=results, step=tuple())
 

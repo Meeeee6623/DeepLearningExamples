@@ -57,8 +57,8 @@ def set_flags(params):
 
 
 def prepare_model_dir(params):
-    model_dir = os.path.join(params.model_dir, "model_checkpoint")
-    model_dir = model_dir if (hvd.rank() == 0 and not params.benchmark) else None
+    # model_dir = os.path.join(params.model_dir, "model_checkpoint")
+    model_dir = params.model_dir if (hvd.rank() == 0 and not params.benchmark) else None
     if model_dir is not None:
         os.makedirs(model_dir, exist_ok=True)
         if ('train' in params.exec_mode) and (not params.resume_training):
@@ -74,4 +74,7 @@ def get_logger(params):
         if params.log_dir:
             backends += [JSONStreamBackend(Verbosity.VERBOSE, params.log_dir)]
     logger.init(backends=backends)
+    logger.metadata("eval_dice_score", {"unit": None})
+    logger.metadata("throughput_test", {"unit": "images/s"})
+    logger.metadata("throughput_train", {"unit": "images/s"})
     return logger

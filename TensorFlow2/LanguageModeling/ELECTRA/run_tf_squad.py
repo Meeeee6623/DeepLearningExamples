@@ -101,7 +101,7 @@ def parse_args():
                              "be truncated to this length.")
     parser.add_argument("--vocab_file", default=None, type=str,
                         help="Path to vocabulary file use for tokenization")
-
+    parser.add_argument("--ci", action="store_true", help="true if running on CI")
     parser.add_argument(
         "--joint_head",
         default=True,
@@ -328,6 +328,11 @@ def main():
     else:
         dllogger.init(backends=[])
 
+    dllogger.metadata("exact_match", {"unit": None})
+    dllogger.metadata("F1", {"unit": None})
+    dllogger.metadata("inference_sequences_per_second", {"unit": "sequences/s"})
+    dllogger.metadata("training_sequences_per_second", {"unit": "sequences/s"})
+
     tf.random.set_seed(args.seed)
     dllogger.log(step="PARAMETER", data={"SEED": args.seed})
     # script parameters
@@ -497,6 +502,9 @@ def main():
                 # Optimize the model
                 loss_value = train_step(model, inputs, loss, USE_AMP, opt, (iter == 0 and epoch == 0),
                                         v2=args.version_2_with_negative, loss_class=loss_class, fp16=USE_AMP)
+                #introduce CPU-GPU sync for training perf computation
+                loss_numpy = loss_value.numpy()
+                
                 epoch_perf_avg.update_state(1. * BATCH_SIZE / (time.time() - iter_start))
                 if iter % args.log_freq == 0:
                     if is_main_process():
@@ -521,7 +529,10 @@ def main():
                                                  "final_loss": float(epoch_loss_avg.result().numpy())})
 
             if not args.skip_checkpoint:
-                checkpoint_name = "checkpoints/electra_base_qa_v2_{}_epoch_{}_ckpt".format(args.version_2_with_negative, epoch + 1)
+                if args.ci:
+                    checkpoint_name = "{}/electra_base_qa_v2_{}_epoch_{}_ckpt".format(args.output_dir, args.version_2_with_negative, epoch + 1)
+                else:
+                    checkpoint_name = "checkpoints/electra_base_qa_v2_{}_epoch_{}_ckpt".format(args.version_2_with_negative, epoch + 1)
                 if is_main_process():
                     model.save_weights(checkpoint_name)
 

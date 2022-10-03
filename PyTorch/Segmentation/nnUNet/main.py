@@ -1,4 +1,4 @@
-# Copyright (c) 2021, NVIDIA CORPORATION. All rights reserved.
+# Copyright (c) 2021-2022, NVIDIA CORPORATION. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,74 +14,76 @@
 
 import os
 
-import torch
 from pytorch_lightning import Trainer, seed_everything
-from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint, early_stopping
+from pytorch_lightning.callbacks import ModelCheckpoint, ModelSummary, RichProgressBar
+from pytorch_lightning.loggers import TensorBoardLogger
 
 from data_loading.data_module import DataModule
-from models.nn_unet import NNUnet
-from utils.gpu_affinity import set_affinity
+from nnunet.nn_unet import NNUnet
+from utils.args import get_main_args
 from utils.logger import LoggingCallback
-from utils.utils import get_main_args, is_main_process, log, make_empty_dir, set_cuda_devices, verify_ckpt_path
+from utils.utils import make_empty_dir, set_cuda_devices, set_granularity, verify_ckpt_path
 
 if __name__ == "__main__":
     args = get_main_args()
-
-    if args.affinity != "disabled":
-        affinity = set_affinity(os.getenv("LOCAL_RANK", "0"), args.affinity)
-
+    set_granularity()  # Increase maximum fetch granularity of L2 to 128 bytes
     set_cuda_devices(args)
-    seed_everything(args.seed)
+    if args.seed is not None:
+        seed_everything(args.seed)
     data_module = DataModule(args)
-    data_module.prepare_data()
     data_module.setup()
     ckpt_path = verify_ckpt_path(args)
 
-    callbacks = None
-    model_ckpt = None
+    model = NNUnet(args)
+    callbacks = [RichProgressBar(), ModelSummary(max_depth=2)]
+    logger = False
     if args.benchmark:
-        model = NNUnet(args)
         batch_size = args.batch_size if args.exec_mode == "train" else args.val_batch_size
-        log_dir = os.path.join(args.results, args.logname if args.logname is not None else "perf.json")
-        callbacks = [
+        filnename = args.logname if args.logname is not None else "perf.json"
+        callbacks.append(
             LoggingCallback(
-                log_dir=log_dir,
-                global_batch_size=batch_size * args.gpus,
+                log_dir=args.results,
+                filnename=filnename,
+                global_batch_size=batch_size * args.gpus * args.nodes,
                 mode=args.exec_mode,
                 warmup=args.warmup,
                 dim=args.dim,
             )
-        ]
+        )
     elif args.exec_mode == "train":
-        model = NNUnet(args)
-        early_stopping = EarlyStopping(monitor="dice_mean", patience=args.patience, verbose=True, mode="max")
-        callbacks = [early_stopping]
-        if args.save_ckpt:
-            model_ckpt = ModelCheckpoint(
-                filename="{epoch}-{dice_mean:.2f}", monitor="dice_mean", mode="max", save_last=True
+        if args.tb_logs:
+            logger = TensorBoardLogger(
+                save_dir=f"{args.results}/tb_logs",
+                name=f"task={args.task}_dim={args.dim}_fold={args.fold}_precision={16 if args.amp else 32}",
+                default_hp_metric=False,
+                version=0,
             )
-            callbacks.append(model_ckpt)
-    else:  # Evaluation or inference
-        if ckpt_path is not None:
-            model = NNUnet.load_from_checkpoint(ckpt_path)
-        else:
-            model = NNUnet(args)
+        if args.save_ckpt:
+            callbacks.append(
+                ModelCheckpoint(
+                    dirpath=f"{args.ckpt_store_dir}/checkpoints",
+                    filename="{epoch}-{dice:.2f}",
+                    monitor="dice",
+                    mode="max",
+                    save_last=True,
+                )
+            )
 
     trainer = Trainer(
-        logger=False,
-        gpus=args.gpus,
-        precision=16 if args.amp else 32,
+        logger=logger,
+        default_root_dir=args.results,
         benchmark=True,
         deterministic=False,
-        min_epochs=args.epochs,
         max_epochs=args.epochs,
-        sync_batchnorm=args.sync_batchnorm,
+        precision=16 if args.amp else 32,
         gradient_clip_val=args.gradient_clip_val,
+        enable_checkpointing=args.save_ckpt,
         callbacks=callbacks,
         num_sanity_val_steps=0,
-        default_root_dir=args.results,
-        resume_from_checkpoint=ckpt_path,
-        accelerator="ddp" if args.gpus > 1 else None,
+        accelerator="gpu",
+        devices=args.gpus,
+        num_nodes=args.nodes,
+        strategy="ddp" if args.gpus > 1 else None,
         limit_train_batches=1.0 if args.train_batches == 0 else args.train_batches,
         limit_val_batches=1.0 if args.test_batches == 0 else args.test_batches,
         limit_test_batches=1.0 if args.test_batches == 0 else args.test_batches,
@@ -89,24 +91,17 @@ if __name__ == "__main__":
 
     if args.benchmark:
         if args.exec_mode == "train":
-            trainer.fit(model, train_dataloader=data_module.train_dataloader())
+            trainer.fit(model, train_dataloaders=data_module.train_dataloader())
         else:
             # warmup
-            trainer.test(model, test_dataloaders=data_module.test_dataloader())
+            trainer.test(model, dataloaders=data_module.test_dataloader(), verbose=False)
             # benchmark run
-            trainer.current_epoch = 1
-            trainer.test(model, test_dataloaders=data_module.test_dataloader())
+            model.start_benchmark = 1
+            trainer.test(model, dataloaders=data_module.test_dataloader(), verbose=False)
     elif args.exec_mode == "train":
-        trainer.fit(model, data_module)
-        if is_main_process():
-            logname = args.logname if args.logname is not None else "train_log.json"
-            log(logname, torch.tensor(model.best_mean_dice), results=args.results)
+        trainer.fit(model, datamodule=data_module, ckpt_path=ckpt_path)
     elif args.exec_mode == "evaluate":
-        model.args = args
-        trainer.test(model, test_dataloaders=data_module.val_dataloader())
-        if is_main_process():
-            logname = args.logname if args.logname is not None else "eval_log.json"
-            log(logname, model.eval_dice, results=args.results)
+        trainer.validate(model, val_dataloaders=data_module.val_dataloader())
     elif args.exec_mode == "predict":
         if args.save_preds:
             ckpt_name = "_".join(args.ckpt_path.split("/")[-1].split(".")[:-1])
@@ -118,4 +113,4 @@ if __name__ == "__main__":
             model.save_dir = save_dir
             make_empty_dir(save_dir)
         model.args = args
-        trainer.test(model, test_dataloaders=data_module.test_dataloader())
+        trainer.test(model, test_dataloaders=data_module.test_dataloader(), ckpt_path=ckpt_path)

@@ -12,11 +12,16 @@ This repository provides a script and recipe to train the Deep Learning Recommen
      * [Mixed precision training](#mixed-precision-training)
         * [Enabling mixed precision](#enabling-mixed-precision)
         * [Enabling TF32](#enabling-tf32)
-     * [Hybrid-parallel multi-GPU with all-2-all communication](#hybrid-parallel-multi-gpu-with-all-2-all-communication)
-        * [Embedding table placement and load balancing (default mode)](#embedding-table-placement-and-load-balancing-default-mode)
-        * [Training very large embedding tables (experimental mode)](#training-very-large-embedding-tables-experimental-mode)
+     * [Hybrid-parallel training with Merlin Distributed Embeddings](#hybrid-parallel-training-with-merlin-distributed-embeddings)
+        * [Training very large embedding tables](#training-very-large-embedding-tables)
         * [Multi-node training](#multi-node-training)
      * [Preprocessing on GPU with Spark 3](#preprocessing-on-gpu-with-spark-3)
+     * [BYO dataset functionality overview](#byo-dataset-functionality-overview)
+         * [Glossary](#glossary)
+         * [Dataset feature specification](#dataset-feature-specification)
+         * [Data flow in NVIDIA Deep Learning Examples recommendation models](#data-flow-in-nvidia-deep-learning-examples-recommendation-models)
+         * [Example of dataset feature specification](#example-of-dataset-feature-specification)
+         * [BYO dataset functionality](#byo-dataset-functionality)
   * [Setup](#setup)
      * [Requirements](#requirements)
   * [Quick Start Guide](#quick-start-guide)
@@ -26,7 +31,9 @@ This repository provides a script and recipe to train the Deep Learning Recommen
      * [Command-line options](#command-line-options)
      * [Getting the data](#getting-the-data)
         * [Dataset guidelines](#dataset-guidelines)
-        * [Multi-dataset](#multi-dataset)
+        * [BYO dataset](#byo-dataset)
+          * [Channel definitions and requirements](#channel-definitions-and-requirements)
+          * [BYO dataset constraints for the model](#BYO-dataset-constraints-for-the-model)
         * [Preprocess with Spark](#preprocess-with-spark)
      * [Training process](#training-process)
   * [Performance](#performance)
@@ -56,18 +63,35 @@ This repository provides a script and recipe to train the Deep Learning Recommen
 
 ## Model overview
 
-The Deep Learning Recommendation Model (DLRM) is a recommendation model designed to make use of both categorical and numerical inputs. It was first described in [Deep Learning Recommendation Model for Personalization and Recommendation Systems](https://arxiv.org/abs/1906.00091).
+The Deep Learning Recommendation Model (DLRM) is a recommendation model designed to make use of both categorical and numerical inputs.
+It was first described in [Deep Learning Recommendation Model for Personalization and Recommendation Systems](https://arxiv.org/abs/1906.00091).
 This repository provides a reimplementation of the code-base provided originally [here](https://github.com/facebookresearch/dlrm).
 The scripts enable you to train DLRM on the [Criteo Terabyte Dataset](https://labs.criteo.com/2013/12/download-terabyte-click-logs/).
 
-Using the scripts provided here, you can efficiently train models that are too large to fit into a single GPU. This is because we use a hybrid-parallel approach, which combines model parallelism with data parallelism for different parts of the neural network. This is explained in details in the [next section](#hybrid-parallel-multi-gpu-with-all-2-all-communication).
+Using the scripts provided here, you can efficiently train models that are too large to fit into a single GPU.
+This is because we use a hybrid-parallel approach, which combines model parallelism with data parallelism for
+different parts of the neural network.
+This is explained in details in the [next section](#hybrid-parallel-multi-gpu-with-all-2-all-communication).
 
-This model uses a slightly different preprocessing procedure than the one found in the original implementation. You can find a detailed description of the preprocessing steps in the [Dataset guidelines](#dataset-guidelines) section.
+This model uses a slightly different preprocessing procedure than the one found in the original implementation.
+Most importantly, we use a technique called frequency thresholding to demonstrate models of different size.
+The smallest model can be trained on a single V100-32GB GPU, while the largest one needs 8xA100-80GB GPUs.  
+The table below summarizes the model sizes and frequency thresholds used in this repository:
+
+| Name          | Frequency threshold   | Number of parameters   | Model size|
+|:--------------|:---|:-------------|:-------------------|
+| Small         | 15| 4.2B | 15.6 GiB |
+| Large         | 3 | 22.8B | 84.9 GiB |
+| Extra large   | 0 | 113B | 421 GiB |
+
+You can find a detailed description of the preprocessing steps in the [Dataset guidelines](#dataset-guidelines) section.
 
 Using DLRM, you can train a high-quality general model for recommendations.
 
-This model is trained with mixed precision using Tensor Cores on Volta, Turing and NVIDIA Ampere GPU architectures. Therefore, researchers can get results 2x faster than training without Tensor Cores while experiencing the benefits of mixed precision training. This model is tested against each NGC monthly container release to ensure consistent accuracy and performance over time.
-
+This model is trained with mixed precision using Tensor Cores on Volta, Turing and NVIDIA Ampere GPU architectures.
+Therefore, researchers can get results 2x faster than training without Tensor Cores while experiencing the
+benefits of mixed precision training. This model is tested against each NGC monthly container
+release to ensure consistent accuracy and performance over time.
 
 
 ### Model architecture
@@ -77,8 +101,6 @@ DLRM accepts two types of features: categorical and numerical. For each categori
 This part of the network consists of a series
 of linear layers with ReLU activations. The output of the bottom MLP and the embedding vectors are then fed into the "dot interaction" operation. The output of "dot interaction" is then concatenated with the features resulting from bottom MLP and fed into the "top MLP" which is a series of dense layers with activations.
 The model outputs a single number which can be interpreted as a likelihood of a certain user clicking an ad.
-
-
 
 <p align="center">
   <img width="100%" src="img/singlegpu_architecture.svg" />
@@ -103,7 +125,7 @@ The following features are supported by this model:
 |----------------------|--------------------------
 |Automatic mixed precision (AMP)   | Yes
 |XLA | Yes
-|Hybrid-parallel multiGPU with Horovod all-to-all| Yes
+|Hybrid-parallel training with Merlin Distributed Embeddings | Yes
 |Preprocessing on GPU with Spark 3| Yes
 |Multi-node training | Yes
 
@@ -119,8 +141,10 @@ The training script supports a `--xla` flag. It can be used to enable XLA JIT co
 **Horovod**
 Horovod is a distributed training framework for TensorFlow, Keras, PyTorch, and MXNet. The goal of Horovod is to make distributed deep learning fast and easy to use. For more information about how to get started with Horovod, see the Horovod [official repository](https://github.com/horovod/horovod).
 
-**Hybrid-parallel multiGPU with Horovod all-to-all**
-Our model uses Horovod to implement efficient multi-GPU training with NCCL. For details, see example sources in this repository or see the TensorFlow tutorial. For the detailed description of our multi-GPU approach, visit this [section](hybrid-parallel-multi-gpu-with-all-2-all-communication).
+**Hybrid-parallel training with Merlin Distributed Embeddings**
+Our model uses Merlin Distributed Embeddings to implement efficient multi-GPU training.
+For details, see example sources in this repository or see the TensorFlow tutorial.
+For the detailed description of our multi-GPU approach, visit this [section](#hybrid-parallel-training-with-merlin-distributed-embeddings).
 
 **Multi-node training**
 This repository supports multinode training. For more information refer to the [multinode section](#multi-node-training)
@@ -154,47 +178,48 @@ For more information, refer to the [TensorFloat-32 in the A100 GPU Accelerates A
 TF32 is supported in the NVIDIA Ampere GPU architecture and is enabled by default.
 
 
-### Hybrid-parallel multi-GPU with all-2-all communication
+### Hybrid-parallel training with Merlin Distributed Embeddings
 
-Many recommendation models contain very large embedding tables. As a result, the model is often too large to fit onto a single device. This could be easily solved by training in a model-parallel way, using either the CPU or other GPUs as "memory donors". However, this approach is suboptimal as the "memory donor" devices' compute is not utilized. In this repository, we use the model-parallel approach for the bottom part of the model (Embedding Tables + bottom MLP) while using a usual data parallel approach for the top part of the model (Dot Interaction + top MLP). This way, we can train models much larger than what would normally fit into a single GPU while at the same time making the training faster by using multiple GPUs. We call this approach hybrid-parallel training.
+Many recommendation models contain very large embedding tables. As a result, the model is often too large to fit onto a single device.
+This could be easily solved by training in a model-parallel way, using either the CPU or other GPUs as "memory donors".
+However, this approach is suboptimal as the "memory donor" devices' compute is not utilized.
+In this repository, we use the model-parallel approach for the Embedding Tables while employing a usual data parallel approach
+for the more compute-intensive MLPs and Dot Interaction layer. This way, we can train models much larger than what would normally fit into
+a single GPU while at the same time making the training faster by using multiple GPUs. We call this approach hybrid-parallel training.
 
-The transition from model-parallel to data-parallel in the middle of the neural net needs a specific multi-GPU communication pattern called [all-2-all](https://en.wikipedia.org/wiki/All-to-all_\(parallel_pattern\)) which is available in our [TensorFlow 2 21.02-py3](https://ngc.nvidia.com/catalog/containers/nvidia:tensorflow/tags) NGC Docker container. In the [original DLRM whitepaper](https://arxiv.org/abs/1906.00091) this has been referred to as "butterfly shuffle".
+To implement this approach we use the [Merlin Distributed Embeddings](https://github.com/NVIDIA-Merlin/distributed-embeddings) library. 
+It provides a scalable model parallel wrapper called `distributed_embeddings.dist_model_parallel`. This wrapper automatically distributes embedding tables to multiple GPUs.
+This way embeddings can be scaled beyond single GPU’s memory capacity without
+complex code to handle cross-worker communication.
 
+Under the hood, Merlin Distributed Embeddings uses a
+specific multi-GPU communication pattern called
+[all-2-all](https://en.wikipedia.org/wiki/All-to-all_\(parallel_pattern\)) to transition from model-parallel to data-parallel
+paradigm. In the [original DLRM whitepaper](https://arxiv.org/abs/1906.00091) this has been referred to as "butterfly shuffle".
+
+An example model using Hybrid Parallelism is shown in Figure 2. The compute intensive dense layers are run in data-parallel
+mode. The smaller embedding tables are run model-parallel, such that each smaller table is placed entirely on a single device.
+This is not suitable for larger tables that need more memory than can be provided by a single device. Therefore,
+those large tables are split into multiple parts and each part is run on a different GPU.
 
 <p align="center">
   <img width="100%" src="./img/hybrid_parallel.svg" />
   <br>
-Figure 2. The default multi-GPU mode.
+Figure 2. Hybrid parallelism with Merlin Distributed Embeddings.
 </p>
 
+In this repository we train models of three sizes: "small" (15.6 GiB), "large" (84.9 GiB) and "extra large" (421 GiB).
+The "small" model can be trained on a single V100-32GB GPU. The "large" model needs at least 8xV100-32GB GPUs,
+but each of the tables it uses can fit on a singleGPU. 
 
-As the example shows, in this repository we train models of two sizes: "small" (~15 GB) and "large" (~82 GB). The "large" model cannot be trained in a single GPU paradigm as it will not fit into a single GPU memory.
+The "extra large" model, on the other hand, contains tables that do not fit into a singledevice, and will be automatically
+split and stored across multiple GPUs by Merlin Distributed Embeddings.
 
-#### Embedding table placement and load balancing (default mode)
+#### Training very large embedding tables
 
-By default, we use the following heuristic for dividing the work between the GPUs:
-- The bottom MLP is placed on GPU-0 and no embedding tables are placed on this device.
-- The tables are sorted from the largest to the smallest.
-- Set `max_tables_per_gpu := ceil(number_of_embedding_tables / number_of_available_gpus)`.
-- Repeat until all embedding tables have an assigned device:
-    - Out of all the available GPUs, find the one with the largest amount of unallocated memory.
-    - Place the largest unassigned embedding table on this GPU. Raise an exception if it does not fit.
-    - If the number of embedding tables on this GPU is now equal to `max_tables_per_gpu`, remove this GPU from the list of available GPUs, so that no more embedding tables will be placed on this GPU. This ensures the all-2-all communication is well-balanced between all devices.
-
-#### Training very large embedding tables (experimental mode)
-
-The default multi-GPU paradigm described above has a constraint – each individual table has to fit into a single device's memory. If that's not met, then an Out-of-Memory error will be raised. To enable experimentation with very large models, we provide a way of circumventing this constraint by passing the `--experimental_columnwise_split --data_parallel_bottom_mlp` command-line flags. As a result, each table will be split across the latent space dimension. Some dimensions of the latent space will be placed on one GPU and the rest of them are stored on other GPUs. This means that a table that originally encoded C unique categories into D dense dimensions will now become N separate tables of shape `[C, D / N]` each stored on a different GPU, where N is the number of GPUs used. Symbolically, the computations are exactly equivalent.
-
-The figure below illustrates this paradigm for a model with 2 embedding tables distributed across two GPUs. Note that this approach is currently slower than the default mode described above.
-
-<p align="center">
-  <img width="100%" src="img/columnwise_split.svg" />
-  <br>
-Figure 3. The "columnwise split" multi-GPU mode. 
-</p>
-
-
-We tested this approach by training a DLRM model on the Criteo Terabyte dataset with the frequency limiting option turned off (set to zero). The weights of the resulting model take 421 GB. The largest table weighs 140 GB. Here are the commands you can use to reproduce this:
+We tested this approach by training a DLRM model on the Criteo Terabyte dataset with the frequency limiting option turned off (set to zero).
+The weights of the resulting model take 421 GiB. The largest table weighs 140 GiB.
+Here are the commands you can use to reproduce this:
 
 ```
 # build and run the preprocessing container as in the Quick Start Guide
@@ -203,18 +228,22 @@ We tested this approach by training a DLRM model on the Criteo Terabyte dataset 
 
 # build and run the training container same as in the Quick Start Guide
 # then append options necessary for training very large embedding tables:
-horovodrun -np 8 -H localhost:8 --mpi-args=--oversubscribe numactl --interleave=all -- python -u main.py --dataset_path /data/dlrm/ --amp --tf_gpu_memory_limit_gb 72 --experimental_columnwise_split --data_parallel_bottom_mlp --xla
+horovodrun -np 8 -H localhost:8 --mpi-args=--oversubscribe numactl --interleave=all -- python -u main.py --dataset_path /data/dlrm/ --amp --xla
 ```
 
 When using this method on a DGX A100 with 8 A100-80GB GPUs and a large-enough dataset, it is possible to train a single embedding table of up to 600 GB. You can also use multi-node training (described below) to train even larger recommender systems.
 
+This mode was used to train the 421GiB "extra large" model in [the DGX A100-80G performance section](#training-performance-nvidia-dgx-a100-8x-a100-80gb).
+
 #### Multi-node training
 
-Multi-node training is supported. Depending on the exact interconnect hardware and model configuration, you might experience only a modest speedup with multi-node. Multi-node training can also be used to train larger models. For example, to train a 1.68 TB variant of DLRM on multi-node, you can run:
+Multi-node training is supported. Depending on the exact interconnect hardware and model configuration,
+you might experience only a modest speedup with multi-node.
+Multi-node training can also be used to train larger models.
+For example, to train a 1.68 TB variant of DLRM on multi-node, you can run:
 
 ```
-cmd='numactl --interleave=all -- python -u main.py --dataset_path /data/dlrm/full_criteo_data --amp \
---tf_gpu_memory_limit_gb 72 --experimental_columnwise_split --data_parallel_bottom_mlp \
+cmd='numactl --interleave=all -- python -u main.py --dataset_path /data/dlrm/full_criteo_data --amp --xla\
 --embedding_dim 512 --bottom_mlp_dims 512,256,512' \
 srun_flags='--mpi=pmix' \
 cont=nvidia_dlrm_tf \
@@ -225,6 +254,175 @@ sbatch -n 32 -N 4 -t 00:20:00 slurm_multinode.sh
 ### Preprocessing on GPU with Spark 3
 
 Refer to the ["Preprocessing with Spark" section](#preprocess-with-spark) for a detailed description of the Spark 3 GPU functionality.
+
+### BYO dataset functionality overview
+
+This section describes how you can train the DeepLearningExamples RecSys models on your own datasets without changing
+the model or data loader and with similar performance to the one published in each repository.
+This can be achieved thanks to Dataset Feature Specification, which describes how the dataset, data loader and model
+interact with each other during training, inference and evaluation.
+Dataset Feature Specification has a consistent format across all recommendation models in NVIDIA’s DeepLearningExamples
+repository, regardless of dataset file type and the data loader,
+giving you the flexibility to train RecSys models on your own datasets.
+
+- [Glossary](#glossary)
+- [Dataset Feature Specification](#dataset-feature-specification)
+- [Data Flow in Recommendation Models in DeepLearning examples](#data-flow-in-nvidia-deep-learning-examples-recommendation-models)
+- [Example of Dataset Feature Specification](#example-of-dataset-feature-specification)
+- [BYO dataset functionality](#byo-dataset-functionality)
+
+#### Glossary
+
+The Dataset Feature Specification consists of three mandatory and one optional section:
+
+<b>feature_spec </b> provides a base of features that may be referenced in other sections, along with their metadata.
+	Format: dictionary (feature name) => (metadata name => metadata value)<br>
+
+<b>source_spec </b> provides information necessary to extract features from the files that store them. 
+	Format: dictionary (mapping name) => (list of chunks)<br>
+
+* <i>Mappings</i> are used to represent different versions of the dataset (think: train/validation/test, k-fold splits). A mapping is a list of chunks.<br>
+* <i>Chunks</i> are subsets of features that are grouped together for saving. For example, some formats may constrain data saved in one file to a single data type. In that case, each data type would correspond to at least one chunk. Another example where this might be used is to reduce file size and enable more parallel loading. Chunk description is a dictionary of three keys:<br>
+  * <i>type</i> provides information about the format in which the data is stored. Not all formats are supported by all models.<br>
+  * <i>features</i> is a list of features that are saved in a given chunk. Order of this list may matter: for some formats, it is crucial for assigning read data to the proper feature.<br>
+  * <i>files</i> is a list of paths to files where the data is saved. For Feature Specification in yaml format, these paths are assumed to be relative to the yaml file’s directory (basename). <u>Order of this list matters:</u> It is assumed that rows 1 to i appear in the first file, rows i+1 to j in the next one, etc. <br>
+
+<b>channel_spec</b> determines how features are used. It is a mapping (channel name) => (list of feature names). 
+
+Channels are model specific magic constants. In general, data within a channel is processed using the same logic. Example channels: model output (labels), categorical ids, numerical inputs, user data, and item data.
+
+<b>metadata</b> is a catch-all, wildcard section: If there is some information about the saved dataset that does not fit into the other sections, you can store it here.
+
+#### Dataset feature specification
+
+Data flow can be described abstractly:
+Input data consists of a list of rows. Each row has the same number of columns; each column represents a feature.
+The columns are retrieved from the input files, loaded, aggregated into channels and supplied to the model/training script. 
+
+FeatureSpec contains metadata to configure this process and can be divided into three parts:
+
+* Specification of how data is organized on disk (source_spec). It describes which feature (from feature_spec) is stored in which file and how files are organized on disk.
+
+* Specification of features (feature_spec). Describes a dictionary of features, where key is feature name and values are features’ characteristics such as  dtype and other metadata (for example, cardinalities for categorical features)
+
+* Specification of model’s inputs and outputs (channel_spec). Describes a dictionary of model’s inputs where keys specify model channel’s names and values specify lists of features to be loaded into that channel. Model’s channels are groups of data streams to which common model logic is applied, for example categorical/continuous data, user/item ids. Required/available channels depend on the model
+
+
+The FeatureSpec is a common form of description regardless of underlying dataset format, dataset data loader form and model. 
+
+
+#### Data flow in NVIDIA Deep Learning Examples recommendation models
+
+The typical data flow is as follows:
+* <b>S.0.</b> Original dataset is downloaded to a specific folder.
+* <b>S.1.</b> Original dataset is preprocessed into Intermediary Format. For each model, the preprocessing is done differently, using different tools. The Intermediary Format also varies (for example, for DLRM PyTorch, the Intermediary Format is a custom binary one.)
+* <b>S.2.</b> The Preprocessing Step outputs Intermediary Format with dataset split into training and validation/testing parts along with the Dataset Feature Specification yaml file. Metadata in the preprocessing step is automatically calculated.
+* <b>S.3.</b> Intermediary Format data together with Dataset Feature Specification are fed into training/evaluation scripts. Data loader reads Intermediary Format and feeds the data into the model according to the description in the Dataset Feature Specification.
+* <b>S.4.</b> The model is trained and evaluated
+
+
+
+<p align="center">
+  <img width="70%" src="./img/df_diagram.png" />
+  <br>
+
+Fig.1. Data flow in Recommender models in NVIDIA Deep Learning Examples repository. Channels of the model are drawn in green</a>.
+</p>
+
+
+#### Example of dataset feature specification
+
+As an example, let’s consider a Dataset Feature Specification for a small CSV dataset for some abstract model.
+
+```yaml
+feature_spec:
+  user_gender:
+    dtype: torch.int8
+    cardinality: 3 #M,F,Other
+  user_age: #treated as numeric value
+    dtype: torch.int8
+  user_id:
+    dtype: torch.int32
+    cardinality: 2655
+  item_id:
+    dtype: torch.int32
+    cardinality: 856
+  label:
+    dtype: torch.float32
+
+source_spec:
+  train:
+    - type: csv
+      features:
+        - user_gender
+        - user_age
+      files:
+        - train_data_0_0.csv
+        - train_data_0_1.csv
+    - type: csv
+      features:
+        - user_id
+        - item_id
+        - label
+      files:
+        - train_data_1.csv
+  test:
+    - type: csv
+      features:
+        - user_id
+        - item_id
+        - label
+        - user_gender
+        - user_age
+        
+      files:
+        - test_data.csv
+
+channel_spec:
+  numeric_inputs: 
+    - user_age
+  categorical_user_inputs: 
+    - user_gender
+    - user_id
+  categorical_item_inputs: 
+    - item_id
+  label_ch: 
+    - label
+```
+
+
+The data contains five features: (user_gender, user_age, user_id, item_id, label). Their data types and necessary metadata are described in the feature specification section.
+
+In the source mapping section, two mappings are provided: one describes the layout of the training data, the other of the testing data. The layout for training data has been chosen arbitrarily to showcase the flexibility.
+The train mapping consists of two chunks. The first one contains user_gender and user_age, saved as a CSV, and is further broken down into two files. For specifics of the layout, refer to the following example and consult the glossary. The second chunk contains the remaining columns and is saved in a single file. Notice that the order of columns is different in the second chunk - this is alright, as long as the order matches the order in that file (that is, columns in the .csv are also switched)
+
+
+Let’s break down the train source mapping. The table contains example data color-paired to the files containing it.
+
+<p align="center">
+<img width="70%" src="./img/layout_example.png" />
+</p>
+
+
+
+The channel spec describes how the data will be consumed. Four streams will be produced and available to the script/model.
+The feature specification does not specify what happens further: names of these streams are only lookup constants defined by the model/script.
+Based on this example, we can speculate that the model has three  input channels: numeric_inputs, categorical_user_inputs,
+categorical_item_inputs, and one  output channel: label.
+Feature names are internal to the FeatureSpec and can be freely modified.
+
+
+#### BYO dataset functionality
+
+In order to train any Recommendation model in NVIDIA Deep Learning Examples one can follow one of three possible ways:
+* One delivers already preprocessed dataset in the Intermediary Format supported by data loader used by the training script
+(different models use different data loaders) together with FeatureSpec yaml file describing at least specification of dataset, features and model channels
+
+* One uses a transcoding script
+
+* One delivers dataset in non-preprocessed form and uses preprocessing scripts that are a part of the model repository.
+In order to use already existing preprocessing scripts, the format of the dataset needs to match the one of the original datasets.
+This way, the FeatureSpec file will be generated automatically, but the user will have the same preprocessing as in the original model repository.
 
 ## Setup
 
@@ -292,18 +490,21 @@ cd preproc
 #
 # to run on CPU with a frequency limit of 15:
 ./prepare_dataset.sh CPU 15
+
+# to run on DGX-2 with no frequency limit:
+./prepare_dataset.sh DGX2 0
 ```
 
 5. Start training.
 
 First, start the Docker container:
 ```bash
-docker run --runtime=nvidia -it --rm --ipc=host  -v ${PWD}/data:/data nvidia_dlrm_tf bash
+docker run --cap-add SYS_NICE --runtime=nvidia -it --rm --ipc=host  -v ${PWD}/data:/data nvidia_dlrm_tf bash
 ```
 
 - single-GPU A100-80GB:
 ```bash
-horovodrun -np 1 -H localhost:1 --mpi-args=--oversubscribe numactl --interleave=all -- python -u main.py --dataset_path /data/dlrm/ --amp --tf_gpu_memory_limit_gb 72 --xla --save_checkpoint_path /data/dlrm/checkpoint/dlrm
+horovodrun -np 1 -H localhost:1 --mpi-args=--oversubscribe numactl --interleave=all -- python -u main.py --dataset_path /data/dlrm/ --amp --xla --save_checkpoint_path /data/dlrm/checkpoint/dlrm
 ```
 
 - single-GPU V100-32GB:
@@ -311,27 +512,27 @@ horovodrun -np 1 -H localhost:1 --mpi-args=--oversubscribe numactl --interleave=
 horovodrun -np 1 -H localhost:1 --mpi-args=--oversubscribe numactl --interleave=all -- python -u main.py --dataset_path /data/dlrm/ --xla --save_checkpoint_path /data/dlrm/checkpoint/dlrm
 ```
 
-- multi-GPU for DGX A100:
-```bash
-horovodrun -np 8 -H localhost:8 --mpi-args=--oversubscribe numactl --interleave=all -- python -u main.py --dataset_path /data/dlrm/ --amp --tf_gpu_memory_limit_gb 72 --xla --save_checkpoint_path /data/dlrm/checkpoint/dlrm
-```
-
-- multi-GPU for DGX2:
-```bash
-horovodrun -np 16 -H localhost:16 --mpi-args=--oversubscribe numactl --interleave=all -- python -u main.py --dataset_path /data/dlrm/ --amp --xla  --save_checkpoint_path /data/dlrm/checkpoint/dlrm
-```
-
-- multi-GPU for DGX1V-32GB:
+- multi-GPU for DGX A100 (model size 90GiB or 421GiB depending on the dataset passed)
 ```bash
 horovodrun -np 8 -H localhost:8 --mpi-args=--oversubscribe numactl --interleave=all -- python -u main.py --dataset_path /data/dlrm/ --amp --xla --save_checkpoint_path /data/dlrm/checkpoint/dlrm
 ```
 
+- multi-GPU for DGX2 (model size 90GiB):
+```bash
+horovodrun -np 16 -H localhost:16 --mpi-args=--oversubscribe numactl --interleave=all -- python -u main.py --dataset_path /data/dlrm/ --amp --xla --column_slice_threshold 5000000000 --save_checkpoint_path /data/dlrm/checkpoint/dlrm 
+```
+
+- multi-GPU for DGX1V-32GB (model size 90GiB):
+```bash
+horovodrun -np 8 -H localhost:8 --mpi-args=--oversubscribe numactl --interleave=all -- python -u main.py --dataset_path /data/dlrm/ --amp --xla --column_slice_threshold 5000000000 --save_checkpoint_path /data/dlrm/checkpoint/dlrm
+```
+
 6. Start evaluation.
 
-To evaluate a previously trained checkpoint, append `--restore_checkpoint_path <path> --mode eval` to the command used for training. For example, to test a checkpoint trained on 8x A100 80GB, run:
+To evaluate a previously trained checkpoint, append `--restore_checkpoint_path <path> --mode eval` to the command used for training. For example, to test a checkpoint trained on 8xA100 80GB, run:
 
 ```bash
-horovodrun -np 8 -H localhost:8 --mpi-args=--oversubscribe numactl --interleave=all -- python -u main.py --dataset_path /data/dlrm/ --amp --tf_gpu_memory_limit_gb 72 --xla --restore_checkpoint_path /data/dlrm/checkpoint/dlrm --mode eval
+horovodrun -np 8 -H localhost:8 --mpi-args=--oversubscribe numactl --interleave=all -- python -u main.py --dataset_path /data/dlrm/ --amp --xla --restore_checkpoint_path /data/dlrm/checkpoint/dlrm --mode eval
 ```
 
 ## Advanced
@@ -344,8 +545,7 @@ These are the important modules in this repository:
 - `main.py` - The main entrypoint script for training, evaluating, and benchmarking.
 - `model.py` - Defines the DLRM model and some auxiliary functions used to train it.
 - `dataloader.py` - Handles defining the dataset objects based on command-line flags.
-- `split_binary_dataset.py` - Defines the `RawBinaryDataset` class responsible for storing and loading the training data.
-- `distributed_utils.py` - Contains the heuristic used for placing the embedding tables across devices. Additionally, defines some data classes describing this placement and some utilities for multi-GPU and multi-node training.
+- `datasets.py` - Defines the `TfRawBinaryDataset` class responsible for storing and loading the training data.
 - `slurm_multinode.sh` - Example batch script for multi-node training on SLURM clusters.
 - `lr_scheduler.py` - Defines a TensorFlow learning rate scheduler that supports both learning rate warmup and polynomial decay.
 - `embedding.py` - Implementations of the embedding layers.
@@ -396,12 +596,143 @@ The preprocessing steps applied to the raw data include:
 - Adding 2 to all the numerical features so that all of them are greater or equal to 1.
 - Taking a natural logarithm of all numerical features.
 
-#### Multi-dataset
+#### BYO dataset 
 
-Our preprocessing scripts are designed for the Criteo Terabyte Dataset and should work with any other dataset with the same format. The data should be split into text files. Each line of those text files should contain a single training example. An example should consist of multiple fields separated by tabulators:
-- The first field is the label – `1` for a positive example and `0` for negative.
-- The next `N` tokens should contain the numerical features separated by tabs.
-- The next `M` tokens should contain the hashed categorical features separated by tabs.
+This implementation supports using other datasets thanks to BYO dataset functionality. 
+The BYO dataset functionality allows users to plug in their dataset in a common fashion for all Recommender models 
+that support this functionality. Using BYO dataset functionality, the user does not have to modify the source code of 
+the model thanks to the Feature Specification file. For general information on how BYO dataset works, refer to the 
+[BYO dataset overview section](#byo-dataset-functionality-overview).
+
+There are three ways to plug in user's dataset:
+<details>
+<summary><b>1. Provide an unprocessed dataset in a format matching the one used by Criteo 1TB, then use Criteo 1TB's preprocessing. Feature Specification file is then generated automatically.</b></summary>
+The required format of the user's dataset is:
+
+The data should be split into text files. Each line of those text files should contain a single training example. 
+An example should consist of multiple fields separated by tabulators:
+
+* The first field is the label – 1 for a positive example and 0 for negative.
+* The next N tokens should contain the numerical features separated by tabs.
+* The next M tokens should contain the hashed categorical features separated by tabs.
+
+The correct dataset files together with the Feature Specification yaml file will be generated automatically by preprocessing script.
+
+For an example of using this process, refer to the [Quick Start Guide](#quick-start-guide)
+
+</details>
+
+<details>
+<summary><b>2. Provide a CSV containing preprocessed data and a simplified Feature Specification yaml file, then transcode the data with `transcode.py` script </b> </summary>
+This option should be used if the user has their own CSV file with a preprocessed dataset they want to train on.
+
+The required format of the user's dataset is:
+* CSV files containing the data, already split into train and test sets. 
+* Feature Specification yaml file describing the layout of the CSV data
+
+For an example of a feature specification file, refer to the `tests/transcoding` folder.
+
+The CSV containing the data:
+* should be already split into train and test
+* should contain no header
+* should contain one column per feature, in the order specified by the list of features for that chunk 
+  in the source_spec section of the feature specification file
+* categorical features should be non-negative integers in the range [0,cardinality-1] if cardinality is specified
+
+The Feature Specification yaml file:
+* needs to describe the layout of data in CSV files
+* may contain information about cardinalities. However, if set to `auto`, they will be inferred from the data by the transcoding script.
+
+Refer to `tests/transcoding/small_csv.yaml` for an example of the yaml Feature Specification.
+
+The following example shows how to use this way of plugging user's dataset:
+
+Prepare your data and save the path:
+```bash
+DATASET_PARENT_DIRECTORY=/raid/dlrm
+```
+
+Build the DLRM image with:
+```bash
+docker build -t nvidia_dlrm_tf .
+```
+Launch the container with:
+```bash
+docker run --cap-add SYS_NICE --runtime=nvidia -it --rm --ipc=host  -v ${DATASET_PARENT_DIRECTORY}/data:/data nvidia_dlrm_tf bash
+```
+
+If you are just testing the process, you can create synthetic csv data:
+```bash
+python gen_csv.py --feature_spec_in tests/transcoding/small_csv.yaml
+```
+
+Convert the data:
+```bash
+mkdir /data/conversion_output
+cp tests/transcoding/small_csv.yaml /data/feature_spec.yaml
+python transcode.py --input /data --output /data/converted
+```
+You may need to tune the --chunk_size parameter. Higher values speed up the conversion but require more RAM.
+
+This will convert the data from `/data` and save the output in `/data/converted`.
+A feature specification file describing the new data will be automatically generated.
+
+To run the training on 1 GPU:
+```bash
+horovodrun -np 1 -H localhost:1 --mpi-args=--oversubscribe numactl --interleave=all -- python -u main.py --dataset_path /data/converted --amp --xla
+```
+
+- multi-GPU for DGX A100:
+```bash
+horovodrun -np 8 -H localhost:8 --mpi-args=--oversubscribe numactl --interleave=all -- python -u main.py --dataset_path /data/converted --amp --xla
+```
+
+- multi-GPU for DGX-1 and DGX-2:
+```bash
+horovodrun -np 8 -H localhost:8 --mpi-args=--oversubscribe numactl --interleave=all -- python -u main.py --dataset_path /data/converted --amp --xla
+```
+</details>
+<details>
+<summary><b>3. Provide a fully preprocessed dataset, saved in split binary files, and a Feature Specification yaml file</b></summary>
+This is the option to choose if you want full control over preprocessing and/or want to preprocess data directly to the target format.
+
+Your final output will need to contain a Feature Specification yaml describing data and file layout. 
+For an example feature specification file, refer to `tests/feature_specs/criteo_f15.yaml`
+
+For details, refer to the [BYO dataset overview section](#byo-dataset-functionality-overview).
+</details>
+
+
+
+##### Channel definitions and requirements
+
+This model defines three channels:
+
+- categorical, accepting an arbitrary number of features
+- numerical, accepting an arbitrary number of features
+- label, accepting a single feature
+
+
+The training script expects two mappings:
+
+- train
+- test
+
+For performance reasons:
+* The only supported dataset type is split binary
+* Splitting chunks into multiple files is not supported.
+* Each categorical feature has to be provided in a separate chunk
+* All numerical features have to be provided in a single chunk
+* All numerical features have to appear in the same order in channel_spec and source_spec
+* Only integer types are supported for categorical features
+* Only float16 is supported for numerical features
+
+##### BYO dataset constraints for the model
+
+There are the following constraints of BYO dataset functionality for this model:
+1. The performance of the model depends on the dataset size. Generally, the model should scale better for datasets containing more data points. For a smaller dataset, you might experience slower performance than the one reported for Criteo
+2. Using other datasets might require tuning some hyperparameters (for example, learning rate, beta1 and beta2) to reach desired accuracy.
+3. The optimized cuda interaction kernels for FP16 and TF32 assume that the number of categorical variables is smaller than WARP_SIZE=32 and embedding size is <=128
 
 
 #### Preprocess with Spark
@@ -507,9 +838,13 @@ horovodrun -np 1 -H localhost:1 --mpi-args=--oversubscribe numactl --interleave=
 
 The following sections provide details on how we achieved our performance and accuracy in training and inference.
 
-We used two model size variants to show memory scalability in multi-GPU setup:
-- small - refers to model trained on Criteo dataset with frequency thresholding set to 15 resulting in smaller embedding tables - total model size: ~15 GB
-- large - refers to model trained on Criteo dataset with frequency thresholding set to 3 resulting in larger embedding tables - total model size: ~82 GB
+We used three model size variants to show memory scalability in multi-GPU setup:
+
+| Name | Dataset | Number of parameters | Model size |
+|:-----|:--------|:---------------------|:------|
+| small | Criteo 1TB, FL=15| 4.2B | 15.6 GiB |
+| large | Criteo 1TB, FL=3 | 22.8B | 84.9 GiB | 
+| extra large | Criteo 1TB, FL=0 | 113B | 421 GiB |
 
 #### Training accuracy results
 
@@ -518,32 +853,29 @@ We used two model size variants to show memory scalability in multi-GPU setup:
 
 Our results were obtained by running training scripts as described in the Quick Start Guide in the DLRM Docker container.
 
-| GPUs    | Model size    | Batch size / GPU    | Accuracy (AUC) - TF32  | Accuracy (AUC) - mixed precision  |   Time to train - TF32 [minutes]  |  Time to train - mixed precision [minutes] | Time to train speedup (TF32 to mixed precision)
-|----:|----|----|----:|----:|---:|---:|---:|
-| 1 | small | 64k | 0.8026 | 0.8026 | 34.78| 25.07| 1.39|
-| 8 | large | 8k | 0.8026 | 0.8026 | 9.33| 7.30| 1.28|
-
+| GPUs   | Model size   | Batch size / GPU   | Accuracy (AUC) - TF32   | Accuracy (AUC) - mixed precision   | Time to train - TF32 [minutes]   | Time to train - mixed precision [minutes]   | Time to train speedup (TF32 to mixed precision)   |
+|:-------|:-------------|:-------------------|:------------------------|:-----------------------------------|:---------------------------------|:--------------------------------------------|:--------------------------------------------------|
+| 1      | small        | 64k                | 0.8025                  | 0.8025                             | 26.75                            | 16.27                                       | 1.64                                              |
+| 8      | large        | 8k                 | 0.8027                  | 0.8026                             | 8.77                             | 6.57                                        | 1.33                                              |
+| 8      | extra large  | 8k                 | 0.8026                  | 0.8026                             | 10.47                            | 9.08                                        | 1.15                                              |
 
 ##### Training accuracy: NVIDIA DGX-1 (8x V100 32GB)
 
 Our results were obtained by running training scripts as described in the Quick Start Guide in the DLRM Docker container.
 
-| GPUs    | Model size    | Batch size / GPU    | Accuracy (AUC) - FP32  | Accuracy (AUC) - mixed precision  |   Time to train - FP32  [minutes] |  Time to train - mixed precision  [minutes] | Time to train speedup (FP32 to mixed precision)
-|----:|----|----|----:|----:|---:|---:|---:|
-| 1 | small | 64k | 0.8026 | 0.8026 | 127.53| 50.55| 2.52|
-| 8 | large | 8k | 0.8026 | 0.8026 | 31.73| 14.92| 2.13|
-
-
+| GPUs   | Model size   | Batch size / GPU   | Accuracy (AUC) - FP32   | Accuracy (AUC) - mixed precision   | Time to train - FP32 [minutes]   | Time to train - mixed precision [minutes]   | Time to train speedup (FP32 to mixed precision)   |
+|:-------|:-------------|:-------------------|:------------------------|:-----------------------------------|:---------------------------------|:--------------------------------------------|:--------------------------------------------------|
+| 1      | small        | 64k                | 0.8027                  | 0.8025                             | 109.63                           | 34.83                                       |  3.15                                             |
+| 8      | large        | 8k                 | 0.8028                  | 0.8026                             | 26.01                            | 13.73                                       |  1.89                                             |
 ##### Training accuracy: NVIDIA DGX-2 (16x V100 32GB)
 
 Our results were obtained by running training scripts as described in the Quick Start Guide in the DLRM Docker container.
 
-| GPUs    | Model size    | Batch size / GPU    | Accuracy (AUC) - FP32  | Accuracy (AUC) - mixed precision  |   Time to train - FP32  [minutes] |  Time to train - mixed precision  [minutes] | Time to train speedup (FP32 to mixed precision)
-|----:|----|----|----:|----:|---:|---:|---:|
-| 1 | small | 64k | 0.8026 | 0.8026 | 112.78| 43.20| 2.61|
-| 8 | large | 8k | 0.8026 | 0.8026 | 25.28| 11.65| 2.17|
-| 16 | large | 4k | 0.8026 | 0.8026 |20.93 | 11.90| 1.76|
-
+| GPUs   | Model size   | Batch size / GPU   | Accuracy (AUC) - FP32   | Accuracy (AUC) - mixed precision   | Time to train - FP32 [minutes]   | Time to train - mixed precision [minutes]   | Time to train speedup (FP32 to mixed precision)   |
+|:-------|:-------------|:-------------------|:------------------------|:-----------------------------------|:---------------------------------|:--------------------------------------------|:--------------------------------------------------|
+| 1      | small        | 64k                | 0.8026                  | 0.8026                             | 105.13                           | 33.37                                       | 3.15                                              |
+| 8      | large        | 8k                 | 0.8027                  | 0.8027                             | 21.21                            | 11.43                                       | 1.86                                              |
+| 16     | large        | 4k                 | 0.8025                  | 0.8026                             | 15.52                            | 10.88                                       | 1.43                                              |
 
 ##### Training stability test
 
@@ -568,31 +900,48 @@ We used throughput in items processed per second as the performance metric.
 Our results were obtained by following the commands from the Quick Start Guide
 in the DLRM Docker container on NVIDIA DGX A100 (8x A100 80GB) GPUs. Performance numbers (in items per second) were averaged over 1000 training steps.
 
-| GPUs   | Model size    | Batch size / GPU   | Throughput - TF32    | Throughput - mixed precision    | Throughput speedup (TF32 - mixed precision)
-|----:|----|----|---:|---:|---:|
-| 1 | small | 64k | 1.99M | 2.78M | 1.40|
-| 8 | large | 8k | 8.41M | 12.6M | 1.50|
+| GPUs   | Model size   | Batch size / GPU   | Throughput - TF32   | Throughput - mixed precision   | Throughput speedup (TF32 to mixed precision)   |
+|:-------|:-------------|:-------------------|:--------------------|:-------------------------------|:-----------------------------------------------|
+| 1      | small        | 64k                | 2.68M               | 4.47M                          | 1.67                                           |
+| 8      | large        | 8k                 | 9.39M               | 13.31M                         | 1.42                                           |
+| 8      | extra large  | 8k                 | 9.93M               | 12.1M                          | 1.22
 
-To achieve these same results, follow the steps in the [Quick Start Guide](#quick-start-guide).
+To achieve these results, follow the steps in the [Quick Start Guide](#quick-start-guide).
+
+##### Training performance: comparison with CPU for the "extra large" model 
+
+For the "extra large" model (113B parameters) we also obtained CPU results for comparison using the same source code
+(using the `--cpu` command line flag for the CPU-only experiments).  
+
+We compare three hardware setups:
+- CPU only,
+- a single GPU that uses CPU memory for the largest embedding tables,
+- Hybrid-Parallel using the full DGX A100-80GB
+
+| Hardware | Throughput [samples / second]|  Speedup over CPU|
+|:---|:---|:---|
+2xAMD EPYC 7742 | 17.7k | 1x |
+1xA100-80GB + 2xAMD EPYC 7742 (large embeddings on CPU) | 768k |43x |
+DGX A100 (8xA100-80GB) (hybrid parallel) | 12.1M | 683x |
 
 
 ##### Training performance: NVIDIA DGX-1 (8x V100 32GB)
 
-| GPUs   | Model size    | Batch size / GPU   | Throughput - FP32    | Throughput - mixed precision    | Throughput speedup (FP32 - mixed precision)   |
-|----:|----|----|---:|---:|---:|
-| 1 | small | 64k | 0.52M| 2.27M| 3.11|
-| 8 | large | 8k | 2.27M| 5.46M | 2.41|
+| GPUs   | Model size   | Batch size / GPU   | Throughput - FP32   | Throughput - mixed precision   | Throughput speedup (FP32 to mixed precision)   |
+|:-------|:-------------|:-------------------|:--------------------|:-------------------------------|:-----------------------------------------------|
+| 1      | small        | 64k                | 0.648M               | 2.06M                          | 3.18                                          |
+| 8      | large        | 8k                 | 2.9M               | 5.89M                          | 2.03                                          |
 
 To achieve the same results, follow the steps in the [Quick Start Guide](#quick-start-guide).
 
 
 ##### Training performance: NVIDIA DGX-2 (16x V100 32GB)
 
-| GPUs   | Model size   | Batch size / GPU   | Throughput - FP32    | Throughput - mixed precision    | Throughput speedup (FP32 - mixed precision)
-|----:|----|---|---:|---:|---:|
-| 1 | small | 64k | 0.64M| 1.65M | 2.58|
-| 8 | large | 8k | 3.05M| 7.98M| 2.61|
-| 16 | large | 4k | 4.30M| 9.21M| 2.14|
+| GPUs   | Model size   | Batch size / GPU   | Throughput - FP32   | Throughput - mixed precision   | Throughput speedup (FP32 to mixed precision)   |
+|:-------|:-------------|:-------------------|:--------------------|:-------------------------------|:-----------------------------------------------|
+| 1      | small        | 64k                | 0.675M              | 2.16M                          | 3.2                                           |
+| 8      | large        | 8k                 | 3.75M               | 7.72M                          | 2.06                                           |
+| 16     | large        | 4k                 | 5.74M               | 9.39M                          | 1.64                                           |
 
 
 To achieve the same results, follow the steps in the [Quick Start Guide](#quick-start-guide).
@@ -600,37 +949,51 @@ To achieve the same results, follow the steps in the [Quick Start Guide](#quick-
 #### Inference performance results
 
 ##### Inference performance: NVIDIA DGX A100 (8x A100 80GB)
-| GPUs   | Model size   | Batch size / GPU | Throughput - TF32 | Throughput - mixed precision |  Average latency - TF32 [ms] | Average latency - mixed precision [ms] | Throughput speedup (mixed precision to TF32)
-|----:|----|---|---:|---:|---:|---:|---:|
-| 1| small| 2048| 755k|828k |2.71|2.47|1.10 |
+
+|   GPUs | Model size   |   Batch size / GPU | Throughput - TF32   | Throughput - mixed precision   |   Average latency - TF32 [ms] |   Average latency - mixed precision [ms] |   Throughput speedup (mixed precision to TF32) |
+|-------:|:-------------|-------------------:|:--------------------|:-------------------------------|------------------------------:|-----------------------------------------:|-----------------------------------------------:|
+|      1 | small        |               2048 | 1.43M               | 1.54M                          |                          1.48 |                                     1.33 |                                              1.08 |
+
 
 ##### Inference performance: NVIDIA DGX1V-32GB (8x V100 32GB)
-| GPUs   | Model size   | Batch size / GPU | Throughput - FP32 | Throughput - mixed precision |  Average latency - FP32 [ms] | Average latency - mixed precision [ms] | Throughput speedup (mixed precision to FP32)
-|----:|----|---|---:|---:|---:|---:|---:|
-| 1| small| 2048| 441k| 497k |4.65|4.12|1.13 |
+
+|   GPUs | Model size   |   Batch size / GPU | Throughput - FP32   | Throughput - mixed precision   |   Average latency - FP32 [ms] |   Average latency - mixed precision [ms] |   Throughput speedup (mixed precision to FP32) |
+|-------:|:-------------|-------------------:|:--------------------|:-------------------------------|------------------------------:|-----------------------------------------:|-----------------------------------------------:|
+|      1 | small        |               2048 | 0.765M               | 1.05M                          | 2.90                          | 1.95                                     | 1.37                                           |
 
 ##### Inference performance: NVIDIA DGX2 (16x V100 16GB)
-| GPUs   | Model size   | Batch size / GPU | Throughput - FP32 | Throughput - mixed precision |  Average latency - FP32 [ms] | Average latency - mixed precision [ms] | Throughput speedup (mixed precision to FP32)
-|----:|----|---|---:|---:|---:|---:|---:|
-| 1| small| 2048| 558k| 774k |3.67|2.65|1.39|
+
+|   GPUs | Model size   |   Batch size / GPU | Throughput - FP32   | Throughput - mixed precision   |   Average latency - FP32 [ms] |   Average latency - mixed precision [ms] |   Throughput speedup (mixed precision to FP32) |
+|-------:|:-------------|-------------------:|:--------------------|:-------------------------------|------------------------------:|-----------------------------------------:|-----------------------------------------------:|
+|      1 | small        |               2048 | 1.03M               | 1.37M                          | 2.10                          |   1.63                                   | 1.53                                           |
 
 
 ## Release notes
 We’re constantly refining and improving our performance on AI and HPC workloads even on the same hardware with frequent updates to our software stack. For our latest performance data please refer to these pages for [AI](https://developer.nvidia.com/deep-learning-performance-training-inference) and [HPC](https://developer.nvidia.com/hpc-application-performance) benchmarks.
 
 ### Changelog
+July 2022
+- Start using Merlin Distributed Embeddings
+
+March 2022
+- Major performance improvements
+- Support for BYO dataset
 
 March 2021
 - Initial release
 
 ### Known issues
 
-#### Horovod issues
-In certain cases, TensorFlow can structure the graph in such a way that the rank-0 GPU has a different order of Horovod all-2-all calls then the other ranks. This will cause a deadlock. It does not happen in the default settings, but there's a chance it will, especially if you make heavy modifications to the bottom part of the model. To circumvent this, you can run the bottom MLP in data-parallel mode. This causes the computational graphs of each GPU to be very similar, thus eliminating the chance of a deadlock. Note this mode will be up to 10% slower than the default mode.
-
 #### Checkpointing
-TensorFlow runs into issues when trying to save model checkpoints for extremely large variables. We circumvent this by using a custom checkpoint format that splits the variables into pieces and stores each piece independently. However, this custom format cannot be used by the standard inference deployment frameworks such as ONNX.
+TensorFlow runs into issues when trying to save model checkpoints for extremely large variables.
+We circumvent this by using a custom checkpoint format that splits the variables into pieces and stores each piece independently.
+However, this custom format cannot be used by the standard inference deployment frameworks such as ONNX.
 
 #### Inference performance
-Current inference performance was evaluated in python using TensorFlow 2.4.0. This provides ease of use and flexibility but is suboptimal in terms of performance. If you're interested in state-of-the-art performance for recommender system inference, please review our results in [the MLPerf v0.7 benchmark](https://mlperf.org/inference-results/) where we used [TensorRT](https://developer.nvidia.com/tensorrt). You might also want to check [the source code of our MLPerf Inference submission](https://github.com/mlcommons/inference_results_v0.7/tree/master/closed/NVIDIA/code/dlrm/tensorrt).
+Current inference performance was evaluated in python using TensorFlow 2.9.1.
+This provides ease of use and flexibility but is suboptimal in terms of performance.
+If you're interested in state-of-the-art performance for recommender system inference,
+please review our results in [the MLPerf v0.7 benchmark](https://mlperf.org/inference-results/)
+where we used [TensorRT](https://developer.nvidia.com/tensorrt).
+You might also want to check [the source code of our MLPerf Inference submission](https://github.com/mlcommons/inference_results_v0.7/tree/master/closed/NVIDIA/code/dlrm/tensorrt).
 

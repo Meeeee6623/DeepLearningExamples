@@ -1,4 +1,4 @@
-# Copyright (c) 2021, NVIDIA CORPORATION. All rights reserved.
+# Copyright (c) 2021-2022, NVIDIA CORPORATION. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -26,10 +26,10 @@ parser.add_argument("--lbls", type=str, required=True, help="Path to labels")
 
 
 def get_stats(pred, targ, class_idx):
-    tp_ = np.logical_and(pred == class_idx, targ == class_idx).sum()
-    fn_ = np.logical_and(pred != class_idx, targ == class_idx).sum()
-    fp_ = np.logical_and(pred == class_idx, targ != class_idx).sum()
-    return tp_, fn_, fp_
+    tp = np.logical_and(pred == class_idx, targ == class_idx).sum()
+    fn = np.logical_and(pred != class_idx, targ == class_idx).sum()
+    fp = np.logical_and(pred == class_idx, targ != class_idx).sum()
+    return tp, fn, fp
 
 
 if __name__ == "__main__":

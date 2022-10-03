@@ -15,20 +15,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from utils.cmdline_helper import parse_cmdline
+from model.resnet import model_architectures
+from runtime import Runner
+import dllogger
+from utils import hvd_wrapper as hvd
+import tensorflow as tf
 import os
 
 import warnings
 warnings.simplefilter("ignore")
 
-import tensorflow as tf
-
-from utils import hvd_wrapper as hvd
-import dllogger
-
-from runtime import Runner
-from model.resnet import model_architectures
-
-from utils.cmdline_helper import parse_cmdline
 
 if __name__ == "__main__":
 
@@ -42,12 +39,22 @@ if __name__ == "__main__":
         os.makedirs(FLAGS.results_dir, exist_ok=True)
 
         dllogger.init(backends=[
-            dllogger.JSONStreamBackend(verbosity=dllogger.Verbosity.VERBOSE, filename=log_path),
+            dllogger.JSONStreamBackend(
+                verbosity=dllogger.Verbosity.VERBOSE, filename=log_path),
             dllogger.StdOutBackend(verbosity=dllogger.Verbosity.VERBOSE)
         ])
     else:
         dllogger.init(backends=[])
     dllogger.log(data=vars(FLAGS), step='PARAMETER')
+
+    dllogger.metadata("train_throughput", {"unit": "images/s"})
+    dllogger.metadata("eval_throughput", {"unit": "images/s"})
+    dllogger.metadata("eval_latency_avg", {"unit": "ms"})
+    dllogger.metadata("eval_latency_p90", {"unit": "ms"})
+    dllogger.metadata("eval_latency_p95", {"unit": "ms"})
+    dllogger.metadata("eval_latency_p99", {"unit": "ms"})
+    dllogger.metadata("top1_accuracy", {"unit": None})
+    dllogger.metadata("top5_accuracy", {"unit": None})
 
     runner = Runner(
         # ========= Model HParams ========= #
@@ -100,7 +107,8 @@ if __name__ == "__main__":
     if FLAGS.mode in ["train_and_evaluate", 'evaluate', 'inference_benchmark']:
 
         if FLAGS.mode == 'inference_benchmark' and hvd.size() > 1:
-            raise NotImplementedError("Only single GPU inference is implemented.")
+            raise NotImplementedError(
+                "Only single GPU inference is implemented.")
 
         elif hvd.rank() == 0:
             runner.evaluate(iter_unit=FLAGS.iter_unit if FLAGS.mode != "train_and_evaluate" else "epoch",
@@ -114,6 +122,10 @@ if __name__ == "__main__":
                             symmetric=FLAGS.symmetric,
                             use_final_conv=FLAGS.use_final_conv,
                             use_qdq=FLAGS.use_qdq)
+        if hvd.size() > 1:
+            # Wait for all processes to finish
+            from mpi4py import MPI
+            MPI.COMM_WORLD.Barrier()
 
     if FLAGS.mode == 'predict':
         if FLAGS.to_predict is None:
@@ -123,7 +135,8 @@ if __name__ == "__main__":
             raise ValueError("Only prediction on single images is supported!")
 
         if hvd.size() > 1:
-            raise NotImplementedError("Only single GPU inference is implemented.")
+            raise NotImplementedError(
+                "Only single GPU inference is implemented.")
 
         else:
             runner.predict(FLAGS.to_predict,

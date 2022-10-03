@@ -1,21 +1,21 @@
-# Text-to-speech
+# Text-to-Speech (TTS)
 
 Speech Synthesis or Text-to-Speech is the task of artificially producing human speech from a raw transcripts. With deep learning today, the synthesized waveforms can sound very natural, almost undistinguishable from how a human would speak. Such Text-to-Speech models can be used in cases like when an interactive virtual assistants responds, or when a mobile device converts the text on a webpage to speech for accessibility reasons. 
 
 In this collection, we will cover:
-- How does speech-to-text work?
+- How does Text-to-Speech work?
 - Usecases and applications
 - Where to get started
 
 ---
-## How does speech-to-text work?
+## How does Text-to-Speech work?
 
 ![](img/9_text-to-speech-figure-1.png)
 
 TTS synthesis is a 2-step process described as follows:
 
 1. Text to Spectrogram Model:
-This model Transforms the text into time-aligned features such as spectrogram, mel spectrogram, or F0 frequencies and other linguistic features. We use architectures like Tacotron
+This model Transforms the text into time-aligned features such as spectrogram, mel spectrogram, or F0 frequencies and other acoustic features. We use architectures like Tacotron
 
 2. Spectrogram to Audio Model:
 Converts generated spectrogram time-aligned representation into continuous human-like audio—for example, WaveGlow.

@@ -1,5 +1,5 @@
 #! /bin/bash
-# Copyright (c) 2021, NVIDIA CORPORATION. All rights reserved.
+# Copyright (c) 2021-2022, NVIDIA CORPORATION. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -30,7 +30,7 @@ do
                 for AFFINITY in "--affinity disabled" "--affinity single" "--affinity socket_unique_interleaved"
                 do 
                     EXP_NAME="TFT_benchmark_${DATASET}_BS_${BATCH_SIZE}_${NGPU}GPU${USE_AMP}_${AFFINITY}"
-                    python -m torch.distributed.launch --nproc_per_node=${NGPU} train.py \
+                    python -m torch.distributed.run --nproc_per_node=${NGPU} train.py \
                             --dataset ${DATASET} \
                             --data_path /data/processed/${DATASET}_bin \
                             --batch_size=${BATCH_SIZE} \

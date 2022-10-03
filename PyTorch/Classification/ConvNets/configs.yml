@@ -10,16 +10,26 @@ precision:
 platform:
     DGX1V-16G:
         workers: 8
+        prefetch: 4
+        gpu_affinity: socket_unique_contiguous
     DGX1V-32G:
         workers: 8
+        prefetch: 4
+        gpu_affinity: socket_unique_contiguous
     T4:
         workers: 8
     DGX1V:
         workers: 8
+        prefetch: 4
+        gpu_affinity: socket_unique_contiguous
     DGX2V:
         workers: 8
+        prefetch: 4
+        gpu_affinity: socket_unique_contiguous
     DGXA100:
-        workers: 16
+        workers: 10
+        prefetch: 4
+        gpu_affinity: socket_unique_contiguous
 
 mode:
     benchmark_training: &benchmark_training
@@ -31,7 +41,7 @@ mode:
     benchmark_training_short:
         <<: *benchmark_training
         epochs: 1
-        data_backend: syntetic
+        data_backend: synthetic
         prof: 100
     benchmark_inference: &benchmark_inference
         print_freq: 1
@@ -44,6 +54,12 @@ mode:
         training_only: False
         evaluate: False
         save_checkpoints: True
+    evaluate:
+        print_freq: 20
+        training_only: False
+        evaluate: True
+        epochs: 1
+        save_checkpoints: False
 
 anchors:
     # ResNet_like params: {{{

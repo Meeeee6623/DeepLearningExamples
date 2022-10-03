@@ -1,4 +1,4 @@
-# Copyright (c) 2021, NVIDIA CORPORATION. All rights reserved.
+# Copyright (c) 2021-2022, NVIDIA CORPORATION. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,20 +12,47 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import operator
+import os
 import time
 
 import dllogger as logger
 import numpy as np
 from dllogger import JSONStreamBackend, StdOutBackend, Verbosity
 from pytorch_lightning import Callback
+from pytorch_lightning.utilities import rank_zero_only
 
-from utils.utils import is_main_process
+
+class DLLogger:
+    def __init__(self, log_dir, filename, append=True):
+        super().__init__()
+        self._initialize_dllogger(log_dir, filename, append)
+
+    @rank_zero_only
+    def _initialize_dllogger(self, log_dir, filename, append):
+        backends = [
+            JSONStreamBackend(Verbosity.VERBOSE, os.path.join(log_dir, filename), append=append),
+            StdOutBackend(Verbosity.VERBOSE),
+        ]
+        logger.init(backends=backends)
+
+    @rank_zero_only
+    def log_metrics(self, metrics, step=None):
+        if step is None:
+            step = ()
+        logger.log(step=step, data=metrics)
+
+    @rank_zero_only
+    def log_metadata(self, metric, metadata):
+        logger.metadata(metric, metadata)
+
+    @rank_zero_only
+    def flush(self):
+        logger.flush()
 
 
 class LoggingCallback(Callback):
-    def __init__(self, log_dir, global_batch_size, mode, warmup, dim):
-        logger.init(backends=[JSONStreamBackend(Verbosity.VERBOSE, log_dir), StdOutBackend(Verbosity.VERBOSE)])
+    def __init__(self, log_dir, filnename, global_batch_size, mode, warmup, dim):
+        self.dllogger = DLLogger(log_dir, filnename)
         self.warmup_steps = warmup
         self.global_batch_size = global_batch_size
         self.step = 0
@@ -33,17 +60,23 @@ class LoggingCallback(Callback):
         self.mode = mode
         self.timestamps = []
 
+        self.dllogger.log_metadata(f"dice_score", {"unit": None})
+        self.dllogger.log_metadata(f"throughput_{self.mode}", {"unit": "images/s"})
+        self.dllogger.log_metadata(f"latency_{self.mode}_mean", {"unit": "ms"})
+        for level in [90, 95, 99]:
+            self.dllogger.log_metadata(f"latency_{self.mode}_{level}", {"unit": "ms"})
+
     def do_step(self):
         self.step += 1
         if self.step > self.warmup_steps:
             self.timestamps.append(time.time())
 
-    def on_train_batch_start(self, trainer, pl_module, batch, batch_idx, dataloader_idx):
+    def on_train_batch_start(self, trainer, pl_module, batch, batch_idx):
         if trainer.current_epoch == 1:
             self.do_step()
 
     def on_test_batch_start(self, trainer, pl_module, batch, batch_idx, dataloader_idx):
-        if trainer.current_epoch == 1:
+        if pl_module.start_benchmark == 1:
             self.do_step()
 
     def process_performance_stats(self, deltas):
@@ -61,17 +94,15 @@ class LoggingCallback(Callback):
 
         return stats
 
+    @rank_zero_only
     def _log(self):
-        if is_main_process():
-            diffs = list(map(operator.sub, self.timestamps[1:], self.timestamps[:-1]))
-            deltas = np.array(diffs)
-            stats = self.process_performance_stats(deltas)
-            logger.log(step=(), data=stats)
-            logger.flush()
+        stats = self.process_performance_stats(np.diff(self.timestamps))
+        self.dllogger.log_metrics(metrics=stats)
+        self.dllogger.flush()
 
     def on_train_end(self, trainer, pl_module):
         self._log()
 
     def on_test_end(self, trainer, pl_module):
-        if trainer.current_epoch == 1:
+        if pl_module.start_benchmark == 1:
             self._log()

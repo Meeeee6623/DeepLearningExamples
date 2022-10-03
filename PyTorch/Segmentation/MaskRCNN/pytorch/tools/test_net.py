@@ -1,5 +1,5 @@
 # Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved.
-# Copyright (c) 2018, NVIDIA CORPORATION. All rights reserved.
+# Copyright (c) 2022, NVIDIA CORPORATION. All rights reserved.
 # Set up custom environment before nearly anything else is imported
 # NOTE: this should be the first import (no not reorder)
 from maskrcnn_benchmark.utils.env import setup_environment  # noqa F401 isort:skip
@@ -19,6 +19,8 @@ from maskrcnn_benchmark.utils.logger import setup_logger
 from maskrcnn_benchmark.utils.miscellaneous import mkdir
 from maskrcnn_benchmark.utils.logger import format_step
 import dllogger
+
+
 
 def main():
     parser = argparse.ArgumentParser(description="PyTorch Object Detection Inference")
@@ -49,6 +51,11 @@ def main():
         help="Mixed precision training",
         action="store_true",
     )
+    parser.add_argument(
+        "--infer_steps",
+        help="Total inference steps",
+        default=-1,
+        type=int)
     parser.add_argument(
         "opts",
         help="Modify config options using the command-line",
@@ -81,6 +88,14 @@ def main():
     else:
         dllogger.init(backends=[])
 
+    dllogger.metadata("BBOX_mAP", {"unit": None})
+    dllogger.metadata("MASK_mAP", {"unit": None})
+    dllogger.metadata("e2e_infer_time", {"unit": "s"})
+    dllogger.metadata("inference_perf_fps", {"unit": "images/s"})
+    dllogger.metadata("latency_avg", {"unit": "s"})
+    dllogger.metadata("latency_90", {"unit": "s"})
+    dllogger.metadata("latency_95", {"unit": "s"})
+    dllogger.metadata("latency_99", {"unit": "s"})
 
     save_dir = ""
     dllogger.log(step="PARAMETER", data={"config":cfg})
@@ -93,8 +108,8 @@ def main():
     if args.fp16:
         use_mixed_precision = True
     else:
-        use_mixed_precision = cfg.DTYPE == "float16" 
-    
+        use_mixed_precision = cfg.DTYPE == "float16"
+
     output_dir = cfg.OUTPUT_DIR
     checkpointer = DetectronCheckpointer(cfg, model, save_dir=output_dir)
     _ = checkpointer.load(cfg.MODEL.WEIGHT)
@@ -127,6 +142,7 @@ def main():
                     output_folder=output_folder,
                     skip_eval=args.skip_eval,
                     dllogger=dllogger,
+                    steps=args.infer_steps
                 )
         else:
             result = inference(
@@ -141,6 +157,7 @@ def main():
                     output_folder=output_folder,
                     skip_eval=args.skip_eval,
                     dllogger=dllogger,
+                    steps=args.infer_steps
                 )
         synchronize()
         results.append(result)

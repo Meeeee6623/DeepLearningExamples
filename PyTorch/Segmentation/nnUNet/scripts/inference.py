@@ -1,4 +1,4 @@
-# Copyright (c) 2021, NVIDIA CORPORATION. All rights reserved.
+# Copyright (c) 2021-2022, NVIDIA CORPORATION. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -15,7 +15,7 @@
 import os
 from argparse import ArgumentDefaultsHelpFormatter, ArgumentParser
 from os.path import dirname
-from subprocess import call
+from subprocess import run
 
 parser = ArgumentParser(ArgumentDefaultsHelpFormatter)
 parser.add_argument("--data", type=str, required=True, help="Path to data")
@@ -41,4 +41,4 @@ if __name__ == "__main__":
     cmd += "--amp " if args.amp else ""
     cmd += "--tta " if args.tta else ""
     cmd += "--save_preds " if args.save_preds else ""
-    call(cmd, shell=True)
+    run(cmd, shell=True)

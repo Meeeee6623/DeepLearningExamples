@@ -35,10 +35,6 @@ try:
     from apex import amp
 except ModuleNotFoundError:
     warnings.warn('APEX AMP is unavailable')
-try:
-    import pyprof
-except ModuleNotFoundError:
-    warnings.warn('PyProf is unavailable')
 
 from torch.nn.parallel import DistributedDataParallel
 
@@ -104,6 +100,8 @@ def parse_args():
                          help='Do not print info on execution env')
     general.add_argument('--no_eval', action='store_true',
                          help='Disable model evaluation')
+    general.add_argument('--no_test', action='store_true',
+                         help='Disable model evaluation on test data')
     general.add_argument('--log_interval', type=int, default=10,
                          help='Report interval')
     general.add_argument('--target_throughput', type=float, default=None,
@@ -122,8 +120,6 @@ def parse_args():
                                   'socket_unique_continuous',
                                   'disabled'],
                          help='type of CPU affinity')
-    general.add_argument('--profile', action='store_true',
-                         help='Enable profiling with DLProf')
 
     dataset = parser.add_argument_group('dataset setup')
     dataset.add_argument('--data', type=str, default='../data/wikitext-103',
@@ -300,9 +296,9 @@ def parse_args():
     return args
 
 
-def save_checkpoint(args, model, model_config, optimizer, scheduler, scaler,
-                    vocab, epoch, batch, last_iter, train_step, best_val_loss,
-                    is_best, work_dir):
+def save_checkpoint(args, model, mems, model_config, optimizer, scheduler,
+                    scaler, vocab, epoch, batch, last_iter, train_step,
+                    best_val_loss, is_best, work_dir, device):
     if args.fp16:
         if args.amp == 'pytorch':
             amp_state = scaler.state_dict()
@@ -311,12 +307,18 @@ def save_checkpoint(args, model, model_config, optimizer, scheduler, scaler,
     else:
         amp_state = None
 
+    memory = [
+        utils.distributed.all_gather_tensors(mem, device) for mem in mems
+    ]
+
     state = {
         'args': args,
         'model_config': model_config,
         'model_state': model.state_dict(),
         'optimizer_state': optimizer.state_dict(),
         'scheduler_state': scheduler.state_dict(),
+        'rng_states': utils.exp_utils.get_default_rng_states(device),
+        'memory': memory,
         'vocab': vocab,
         'amp_state': amp_state,
         'epoch': epoch,
@@ -500,7 +502,7 @@ def train_iteration(model, i, mems, data_chunks, target_chunks, scaler,
     return train_loss
 
 
-def train(tr_iter, va_iter, model, para_model, model_config, optimizer,
+def train(tr_iter, va_iter, model, para_model, mems, model_config, optimizer,
           optimizer_sparse, scheduler, scheduler_sparse, scaler, vocab, epoch,
           last_batch, last_iter, train_step, best_val_loss, meters,
           timeout_handler, device, args):
@@ -508,11 +510,11 @@ def train(tr_iter, va_iter, model, para_model, model_config, optimizer,
     model.train()
 
     train_loss = 0
+    cur_loss = float('inf')
     target_tokens = 0
     log_step = 0
     log_start_time = time.time()
 
-    mems = [None for _ in range(args.batch_chunk)]
     if args.varlen:
         train_iter = tr_iter.get_varlen_iter(start=last_iter)
     else:
@@ -669,10 +671,10 @@ def train(tr_iter, va_iter, model, para_model, model_config, optimizer,
                 is_best = True
 
             if not args.debug:
-                save_checkpoint(args, model, model_config, optimizer, scheduler,
-                                scaler, vocab, epoch, batch, last_iter,
-                                train_step, best_val_loss, is_best,
-                                args.work_dir)
+                save_checkpoint(args, model, mems, model_config, optimizer,
+                                scheduler, scaler, vocab, epoch, batch,
+                                last_iter, train_step, best_val_loss, is_best,
+                                args.work_dir, device)
 
             # dev-performance based learning rate annealing
             if args.scheduler == 'dev_perf':
@@ -689,7 +691,7 @@ def train(tr_iter, va_iter, model, para_model, model_config, optimizer,
 
         if is_final_step:
             break
-    return train_step, best_val_loss
+    return train_step, best_val_loss, cur_loss
 
 
 def main():
@@ -748,14 +750,16 @@ def main():
             raise RuntimeError('Batch size needs to be divisible by '
                                'batch chunk')
 
-    if args.profile:
-        try:
-            pyprof.init(enable_function_stack=True)
-        except NameError:
-            warnings.warn('Called pyprof.init() but pyprof is not available')
-
     logging.info(args)
     dllogger.log(step='PARAMETER', data=vars(args))
+
+    dllogger.metadata('train_throughput', {'unit': 'tokens/s'})
+    dllogger.metadata('train_elapsed', {'unit': 'min'})
+    dllogger.metadata('valid_elapsed', {'unit': 'min'})
+    dllogger.metadata('train_perplexity', {'unit': None})
+    dllogger.metadata('valid_perplexity', {'unit': None})
+    dllogger.metadata('train_loss', {'unit': None})
+    dllogger.metadata('valid_loss', {'unit': None})
 
     logging.info(f'world size: {utils.distributed.get_world_size()}')
 
@@ -968,6 +972,9 @@ def main():
     last_batch = 0
     last_iter = 0
     best_val_loss = None
+    cur_loss = float('inf')
+
+    train_mems = [None for _ in range(args.batch_chunk)]
 
     if args.restart:
         try:
@@ -980,6 +987,15 @@ def main():
                     scaler.load_state_dict(checkpoint['amp_state'])
                 elif args.amp == 'apex':
                     amp.load_state_dict(checkpoint['amp_state'])
+            utils.exp_utils.set_default_rng_states(
+                checkpoint['rng_states'], device
+            )
+
+            train_mems = [
+                checkpoint['memory'][i][utils.distributed.get_rank()]
+                for i in range(args.batch_chunk)
+            ]
+
             train_step = checkpoint['train_step']
             start_epoch = checkpoint['epoch']
             last_batch = checkpoint['batch']
@@ -1007,30 +1023,29 @@ def main():
     # Loop over epochs.
     # At any point you can hit Ctrl + C to break out of training early.
     start_time = time.time()
-    with torch.autograd.profiler.emit_nvtx(enabled=args.profile):
-        with TimeoutHandler() as timeout_handler:
-            try:
-                for epoch in itertools.count(start=start_epoch):
-                    if args.roll:
-                        tr_iter.roll(seed=args.seed + epoch)
-                    train_step, best_val_loss = train(
-                        tr_iter, va_iter, model, para_model, model_config,
-                        optimizer, optimizer_sparse, scheduler,
-                        scheduler_sparse, scaler, vocab, epoch, last_batch,
-                        last_iter, train_step, best_val_loss, meters,
-                        timeout_handler, device, args
-                        )
+    with TimeoutHandler() as timeout_handler:
+        try:
+            for epoch in itertools.count(start=start_epoch):
+                if args.roll:
+                    tr_iter.roll(seed=args.seed + epoch)
+                train_step, best_val_loss, cur_loss = train(
+                    tr_iter, va_iter, model, para_model, train_mems,
+                    model_config, optimizer, optimizer_sparse, scheduler,
+                    scheduler_sparse, scaler, vocab, epoch, last_batch,
+                    last_iter, train_step, best_val_loss, meters,
+                    timeout_handler, device, args
+                    )
 
-                    last_batch = 0
-                    last_iter = 0
+                last_batch = 0
+                last_iter = 0
 
-                    if train_step == args.max_step:
-                        logging.info('-' * 100)
-                        logging.info('End of training')
-                        break
-            except KeyboardInterrupt:
-                logging.info('-' * 100)
-                logging.info('Exiting from training early')
+                if train_step == args.max_step:
+                    logging.info('-' * 100)
+                    logging.info('End of training')
+                    break
+        except KeyboardInterrupt:
+            logging.info('-' * 100)
+            logging.info('Exiting from training early')
     elapsed = time.time() - start_time
 
     ###########################################################################
@@ -1038,16 +1053,20 @@ def main():
     ###########################################################################
     summary = {}
     test_path = os.path.join(args.work_dir, 'checkpoint_best.pt')
-    if not args.debug and not args.no_eval and os.path.exists(test_path):
+    if (
+        not args.debug
+        and not args.no_test
+        and not args.no_eval
+        and os.path.exists(test_path)
+    ):
         # Load the best saved model.
         checkpoint = load_checkpoint(test_path)
         model.load_state_dict(checkpoint['model_state'])
 
         # Run on test data.
         test_start_time = time.time()
-        with torch.autograd.profiler.emit_nvtx(enabled=args.profile):
-            test_loss = evaluate(te_iter, model, args)
-            test_loss = utils.distributed.all_reduce_item(test_loss, 'mean')
+        test_loss = evaluate(te_iter, model, args)
+        test_loss = utils.distributed.all_reduce_item(test_loss, 'mean')
         test_elapsed = time.time() - test_start_time
 
         logging.info('=' * 100)
@@ -1073,21 +1092,22 @@ def main():
     logging.info(f'Training throughput: {meters["train_throughput"].avg:.2f} tok/s')
 
     if best_val_loss:
-        val_perplexity = math.exp(best_val_loss)
+        best_val_perplexity = math.exp(best_val_loss)
     else:
-        val_perplexity = None
+        best_val_perplexity = None
 
     summary.update({
         'train_throughput': meters['train_throughput'].avg,
         'train_elapsed': elapsed / 60,
+        'train_loss': cur_loss,
         'valid_loss': best_val_loss,
-        'valid_perplexity': val_perplexity,
+        'valid_perplexity': best_val_perplexity,
         })
     dllogger.log(step=tuple(), data=summary)
 
     passed = benchmark(
         target_perplexity=args.target_perplexity,
-        test_perplexity=val_perplexity,
+        test_perplexity=best_val_perplexity,
         target_throughput=args.target_throughput,
         test_throughput=meters['train_throughput'].avg
         )

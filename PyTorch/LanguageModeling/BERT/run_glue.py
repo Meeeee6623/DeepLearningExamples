@@ -1,6 +1,6 @@
 # coding=utf-8
 # Copyright 2018 The Google AI Language Team Authors and The HugginFace Inc. team.
-# Copyright (c) 2018, NVIDIA CORPORATION.  All rights reserved.
+# Copyright (c) 2018-2021, NVIDIA CORPORATION.  All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -239,7 +239,7 @@ def parse_args(parser=argparse.ArgumentParser()):
                         help="Whether not to use CUDA when available")
     parser.add_argument("--local_rank",
                         type=int,
-                        default=-1,
+                        default=os.getenv('LOCAL_RANK', -1),
                         help="local_rank for distributed training on gpus")
     parser.add_argument('--seed',
                         type=int,
@@ -486,6 +486,13 @@ def main(args):
     else:
         dllogger.init(backends=[])
 
+    dllogger.metadata("e2e_train_time", {"unit": "s"})
+    dllogger.metadata("training_sequences_per_second", {"unit": "sequences/s"})
+    dllogger.metadata("e2e_inference_time", {"unit": "s"})
+    dllogger.metadata("inference_sequences_per_second", {"unit": "sequences/s"})
+    dllogger.metadata("exact_match", {"unit": None})
+    dllogger.metadata("F1", {"unit": None})
+
     dllogger.log(step="PARAMETER", data={"Config": [str(args)]})
 
     if args.gradient_accumulation_steps < 1:
@@ -546,16 +553,16 @@ def main(args):
     if config.vocab_size % 8 != 0:
         config.vocab_size += 8 - (config.vocab_size % 8)
 
-    modeling.ACT2FN["bias_gelu"] = modeling.bias_gelu_training
+    # modeling.ACT2FN["bias_gelu"] = modeling.bias_gelu_training
     model = modeling.BertForSequenceClassification(
         config,
         num_labels=num_labels,
     )
     logger.info("USING CHECKPOINT from {}".format(args.init_checkpoint))
-    model.load_state_dict(
-        torch.load(args.init_checkpoint, map_location='cpu')["model"],
-        strict=False,
-    )
+
+    checkpoint = torch.load(args.init_checkpoint, map_location='cpu')
+    checkpoint = checkpoint["model"] if "model" in checkpoint.keys() else checkpoint
+    model.load_state_dict(checkpoint, strict=False)
     logger.info("USED CHECKPOINT from {}".format(args.init_checkpoint))
     dllogger.log(
         step="PARAMETER",

@@ -277,6 +277,7 @@ To train your model using mixed or TF32 precision with Tensor Cores or using FP3
    python inference.py \
        --cuda \
        --fastpitch output/<FastPitch checkpoint> \
+       --energy-conditioning \
        --waveglow pretrained_models/waveglow/<WaveGlow checkpoint> \
        --wn-channels 256 \
        -i phrases/devset10.tsv \
@@ -673,6 +674,12 @@ The input utterance has 128 characters, synthesized audio has 8.05 s.
 We're constantly refining and improving our performance on AI and HPC workloads even on the same hardware with frequent updates to our software stack. For our latest performance data please refer to these pages for AI and HPC benchmarks.
 
 ### Changelog
+
+July 2022
+- Performance optimizations, speedups up to 2x (DGX-1) and 2.5x (DGX A100)
+
+June 2022
+- MHA bug fix affecting models with > 1 attention heads
 
 August 2021
 - Improved quality of synthesized audio

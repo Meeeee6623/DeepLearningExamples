@@ -1,4 +1,4 @@
-# Copyright (c) 2021, NVIDIA CORPORATION. All rights reserved.
+# Copyright (c) 2021-2022, NVIDIA CORPORATION. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-ARG FROM_IMAGE_NAME=nvcr.io/nvidia/merlin/merlin-tensorflow-training:21.09
+ARG FROM_IMAGE_NAME=nvcr.io/nvidia/merlin/merlin-tensorflow-training:22.03
 
 FROM ${FROM_IMAGE_NAME}
 
@@ -20,13 +20,11 @@ ENV HOROVOD_CYCLE_TIME=0.1
 ENV HOROVOD_FUSION_THRESHOLD=67108864
 ENV HOROVOD_NUM_STREAMS=2
 
-
-USER root
-
-RUN pip install --no-cache-dir -e git+https://github.com/NVIDIA/dllogger#egg=dllogger
+ADD requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
 WORKDIR  /wd
 
 COPY . .
 
-RUN cd /nvtabular && git checkout v0.6.1
+RUN cd /nvtabular && git checkout v0.7.1
